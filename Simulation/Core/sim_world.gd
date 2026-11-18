@@ -87,6 +87,15 @@ func preflight() -> bool:
 	return false
 
 
+## Slack when comparing the accumulator with one timestep, to absorb floating-point rounding in
+## accumulated frame times. min(1e-12 s, 1e-9 * dt): identical to the former absolute 1e-12 for any
+## dt >= 1e-3 s (including the 1/120 default), and never larger than a billionth of a step, so it can
+## not make `accumulator >= dt - tol` true for an empty accumulator (the former absolute value did
+## for dt <= 1e-12). Double rounding error per addition is ~1e-16 relative; 1e-9 leaves ~7 orders of margin.
+static func step_tolerance(dt: float) -> float:
+	return minf(1.0e-12, dt * 1.0e-9)
+
+
 ## Feed real frame time; runs zero or more fixed steps. Returns the number of steps executed.
 ## If preflight() fails, nothing changes (accumulator, state, time) and 0 is returned.
 func advance(frame_delta: float) -> int:
@@ -95,15 +104,16 @@ func advance(frame_delta: float) -> int:
 		return 0
 	var dt: float = config.fixed_timestep
 	accumulator += minf(maxf(frame_delta, 0.0), config.max_frame_time)
+	var tol: float = step_tolerance(dt)
 	var steps: int = 0
-	while accumulator >= dt - 1.0e-12 and steps < config.max_steps_per_frame:
+	while accumulator >= dt - tol and steps < config.max_steps_per_frame:
 		_step_unchecked()
 		accumulator -= dt
 		steps += 1
-	if accumulator >= dt - 1.0e-12:
+	if accumulator >= dt - tol:
 		# Cap reached with backlog remaining: drop whole steps, keep the sub-step phase.
 		var keep: float = fmod(accumulator, dt)
-		if keep > dt - 1.0e-12:
+		if keep > dt - tol:
 			keep = 0.0  # fmod rounding landed just below a whole step
 		dropped_time += accumulator - keep
 		accumulator = keep

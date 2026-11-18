@@ -20,6 +20,9 @@ or conserved-quantity references use O(dt) tolerances (documented inline in each
   small (1 g body, mm edges; ~1e-30) and large (~1e12, ~1e20) tensors, scale invariance over 1e-30..1e12, conditioning boundary
   (rcond 1e-4/2e-5 accepted, 5e-6/1e-7 rejected), non-finite tensors, non-finite and unrepresentable mass, preserved static
   convention, refusal by `SimWorld.add_body`, `set_mass_properties` and `step()`.
+- `test_accumulator.gd` (M0.1.1): `advance()` accumulator edge cases for dt 1/120 .. 1e-15 (zero elapsed time, partial steps,
+  exact/multiple steps, split increments with no early or lost steps, default tolerance == 1e-12, max-steps cap policy). Tolerances:
+  1e-9 * dt for accumulator/time (the tolerance's own bound), 1e-6 relative for float32 velocities.
 - `test_config_validation.gd` (M0.1): default config valid; 26 invalid values (each reported exactly once, naming its parameter);
   valid boundary values; no clamping; `advance()` and direct `step()` with every invalid case leave the world untouched
   (accumulator, step count, time, pose, velocities, force/torque accumulators, interpolation states); mutation of the config after
@@ -33,10 +36,14 @@ or conserved-quantity references use O(dt) tolerances (documented inline in each
 ## Not covered
 - `Scenes/` and `Simulation/Presentation|Debug` have no automated tests (only the headless smoke run); visual inspection via `godot --path .` on a display has not been done.
 
-## Latest verified results (M0.1)
+## Latest verified results (M0.1.1; the M0.1 figures below are kept as history)
+- M0.1.1: **70 passed, 0 failed, 0 skipped (1249 checks)**, exit 0, 0 `SCRIPT ERROR`; scenes `simulation_test` and `main` 240 frames headless, exit 0, no errors.
+  Starting point was 62/62 (1151 checks). New tests failed before the fix (3 of 8) and pass after.
+
+### M0.1 results
 Godot 4.7.stable.official.5b4e0cb0f (linux x86_64, headless), executed in the M0.1 session:
 - Baseline before any change (commit `f691adf`): **40 passed, 0 failed, 0 skipped (139 checks)**.
-- Final: **62 passed, 0 failed, 0 skipped (1151 checks)**, exit code 0, 0 `SCRIPT ERROR` lines.
+- M0.1 final: **62 passed, 0 failed, 0 skipped (1151 checks)**, exit code 0, 0 `SCRIPT ERROR` lines.
 - The run prints ~79 `ERROR:` lines (+ backtraces). They are expected: the validation tests deliberately build invalid mass properties
   / invalid worlds and `push_error` reports them. Failures are reported only by the `[FAIL]` lines and the exit code.
 - Import (`--import`, `.godot/` deleted first): exit 0, no error lines.

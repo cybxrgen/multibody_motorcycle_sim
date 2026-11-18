@@ -19,7 +19,7 @@ Nothing remains in M0 scope; see `PHASE_PLAN.md` for M1+.
 ## Verification status (what was actually done, by level)
 Environment: Godot 4.7.stable.official.5b4e0cb0f, linux x86_64, headless, no display.
 1. **Project import / parse: done.** `godot --headless --path . --import` from a fresh checkout (`.godot/` deleted first): exit 0, no error lines.
-2. **Headless automated tests: done.** 62 passed, 0 failed, 0 skipped (1151 checks). See TESTING.md.
+2. **Headless automated tests: done.** 70 passed, 0 failed, 0 skipped (1249 checks). See TESTING.md.
 3. **Headless runtime of the scenes: done (smoke only).** `Scenes/simulation_test.tscn` and `Scenes/main.tscn` each ran 240 frames
    (`--quit-after 240`): exit 0, no error output. This shows the scripts load and run; it says nothing about how anything looks.
 4. **Visual inspection on a graphical display: NOT done (unverified).** Camera placement, colors, debug geometry, HUD layout and
