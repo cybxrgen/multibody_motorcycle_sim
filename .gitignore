@@ -1,0 +1,13 @@
+# Godot generated cache / imports
+.godot/
+*.translation
+.import/
+
+# Delivery archives are produced from commits, never committed
+deliveries/
+
+# Temporary / local artifacts
+*.tmp
+*.bak
+*.swp
+.DS_Store

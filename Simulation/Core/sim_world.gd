@@ -1,0 +1,177 @@
+extends RefCounted
+## The single authority over all physical state. Scene-tree independent.
+##
+## Step pipeline (differences from the conceptual pipeline are noted in ARCHITECTURE.md):
+##  1. capture previous state (for render interpolation)
+##  2. accumulate gravity into force accumulators
+##  3. integrate velocities (forces, torques, gyroscopic term)
+##  4. prepare + 5. solve constraints (velocity level, with Baumgarte bias as stabilization)
+##  6. integrate positions / orientations
+##  7. (stabilization is folded into step 5 as the Baumgarte bias; there is no separate position pass)
+##  8. publish new state
+##  9. clear force/torque accumulators
+
+const SimConfig = preload("res://Simulation/Core/sim_config.gd")
+const SimRigidBody = preload("res://Simulation/Core/sim_rigid_body.gd")
+const SimIntegrator = preload("res://Simulation/Core/sim_integrator.gd")
+const ConstraintSolver = preload("res://Simulation/Solver/constraint_solver.gd")
+const SimConstraint = preload("res://Simulation/Solver/sim_constraint.gd")
+
+var config: SimConfig = SimConfig.new()
+var bodies: Array = []
+var constraints: Array = []
+var step_count: int = 0
+var simulation_time: float = 0.0
+var accumulator: float = 0.0
+## Total simulated time discarded by the backlog guard (diagnostic).
+var dropped_time: float = 0.0
+
+## Reason the last advance()/step() was refused, "" when the world is runnable.
+var last_error: String = ""
+## Number of advance()/step() calls refused because of invalid configuration or bodies.
+var rejected_step_count: int = 0
+
+var _reported_error: String = ""
+var _next_body_id: int = 0
+var _solver: ConstraintSolver = ConstraintSolver.new()
+
+
+## Returns the body, or null (with an error) if it is null or has invalid mass properties.
+func add_body(body: SimRigidBody) -> SimRigidBody:
+	if body == null or not body.mass_properties.valid:
+		push_error("SimWorld.add_body: rejected body with invalid mass properties.")
+		return null
+	body.id = _next_body_id
+	_next_body_id += 1
+	body.reset_published_state()
+	bodies.append(body)
+	return body
+
+
+func remove_body(body: SimRigidBody) -> void:
+	bodies.erase(body)
+
+
+func add_constraint(constraint: SimConstraint) -> SimConstraint:
+	constraints.append(constraint)
+	return constraint
+
+
+func remove_constraint(constraint: SimConstraint) -> void:
+	constraints.erase(constraint)
+
+
+## Checks that the world can be stepped: valid configuration and valid body mass properties.
+## Pure check except for diagnostics (last_error, one push_error per distinct failure message).
+## SimConfig is a mutable Resource, so this runs at the start of every advance() and step().
+func preflight() -> bool:
+	var message: String = ""
+	if config == null:
+		message = "config is null"
+	else:
+		var errors: PackedStringArray = config.validate()
+		if not errors.is_empty():
+			message = "invalid SimConfig: " + "; ".join(errors)
+		else:
+			for body in bodies:
+				if not body.mass_properties.valid:
+					message = "body %d has invalid mass properties: %s" % [body.id, body.mass_properties.error_message]
+					break
+	last_error = message
+	if message == "":
+		_reported_error = ""
+		return true
+	if message != _reported_error:
+		_reported_error = message
+		push_error("SimWorld: %s. Steps are refused (no state changes) until this is fixed." % message)
+	return false
+
+
+## Feed real frame time; runs zero or more fixed steps. Returns the number of steps executed.
+## If preflight() fails, nothing changes (accumulator, state, time) and 0 is returned.
+func advance(frame_delta: float) -> int:
+	if not preflight():
+		rejected_step_count += 1
+		return 0
+	var dt: float = config.fixed_timestep
+	accumulator += minf(maxf(frame_delta, 0.0), config.max_frame_time)
+	var steps: int = 0
+	while accumulator >= dt - 1.0e-12 and steps < config.max_steps_per_frame:
+		_step_unchecked()
+		accumulator -= dt
+		steps += 1
+	if accumulator >= dt - 1.0e-12:
+		# Cap reached with backlog remaining: drop whole steps, keep the sub-step phase.
+		var keep: float = fmod(accumulator, dt)
+		if keep > dt - 1.0e-12:
+			keep = 0.0  # fmod rounding landed just below a whole step
+		dropped_time += accumulator - keep
+		accumulator = keep
+	accumulator = maxf(accumulator, 0.0)
+	return steps
+
+
+## Fraction of a step the renderer is ahead of the last published state, in [0, 1).
+func interpolation_alpha() -> float:
+	if config == null or not (is_finite(config.fixed_timestep) and config.fixed_timestep > 0.0):
+		return 0.0
+	return clampf(accumulator / config.fixed_timestep, 0.0, 1.0)
+
+
+## One fixed step. Returns false (and changes nothing) if preflight() fails.
+func step() -> bool:
+	if not preflight():
+		rejected_step_count += 1
+		return false
+	_step_unchecked()
+	return true
+
+
+func _step_unchecked() -> void:
+	var dt: float = config.fixed_timestep
+	for body in bodies:
+		body.previous_state.capture_from(body)
+	for body in bodies:
+		if not body.is_static():
+			body.apply_force(config.gravity * body.mass)
+	for body in bodies:
+		SimIntegrator.integrate_velocities(body, dt)
+	_solver.solve(constraints, dt, config)
+	for body in bodies:
+		SimIntegrator.integrate_positions(body, dt)
+	for body in bodies:
+		body.published_state.capture_from(body)
+		body.clear_accumulators()
+	step_count += 1
+	simulation_time += dt
+
+
+# --- Diagnostics (read-only) ---
+
+func total_linear_momentum() -> Vector3:
+	var p: Vector3 = Vector3.ZERO
+	for body in bodies:
+		p += body.linear_momentum()
+	return p
+
+
+## Angular momentum about the world origin: sum of x_com x (m v) + I_world omega.
+func total_angular_momentum() -> Vector3:
+	var l: Vector3 = Vector3.ZERO
+	for body in bodies:
+		l += body.position.cross(body.linear_momentum()) + body.angular_momentum_about_com()
+	return l
+
+
+func total_kinetic_energy() -> float:
+	var e: float = 0.0
+	for body in bodies:
+		e += body.kinetic_energy()
+	return e
+
+
+func total_potential_energy() -> float:
+	var e: float = 0.0
+	for body in bodies:
+		e -= body.mass * config.gravity.dot(body.position)
+	return e
