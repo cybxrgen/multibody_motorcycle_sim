@@ -52,7 +52,15 @@ func remove_body(body: SimRigidBody) -> void:
 	bodies.erase(body)
 
 
+## Returns the constraint, or null (with an error) if it is null or reports invalid data (SimConstraint.validate()).
 func add_constraint(constraint: SimConstraint) -> SimConstraint:
+	if constraint == null:
+		push_error("SimWorld.add_constraint: rejected null constraint.")
+		return null
+	var errors: PackedStringArray = constraint.validate()
+	if not errors.is_empty():
+		push_error("SimWorld.add_constraint: rejected invalid constraint: %s" % "; ".join(errors))
+		return null
 	constraints.append(constraint)
 	return constraint
 
@@ -61,7 +69,7 @@ func remove_constraint(constraint: SimConstraint) -> void:
 	constraints.erase(constraint)
 
 
-## Checks that the world can be stepped: valid configuration and valid body mass properties.
+## Checks that the world can be stepped: valid configuration, valid body mass properties and valid constraints.
 ## Pure check except for diagnostics (last_error, one push_error per distinct failure message).
 ## SimConfig is a mutable Resource, so this runs at the start of every advance() and step().
 func preflight() -> bool:
@@ -77,6 +85,13 @@ func preflight() -> bool:
 				if not body.mass_properties.valid:
 					message = "body %d has invalid mass properties: %s" % [body.id, body.mass_properties.error_message]
 					break
+			if message == "":
+				# Constraint data is mutable (limits, motor settings, anchors), so it is re-checked every step.
+				for i in constraints.size():
+					var constraint_errors: PackedStringArray = constraints[i].validate()
+					if not constraint_errors.is_empty():
+						message = "constraint %d is invalid: %s" % [i, "; ".join(constraint_errors)]
+						break
 	last_error = message
 	if message == "":
 		_reported_error = ""

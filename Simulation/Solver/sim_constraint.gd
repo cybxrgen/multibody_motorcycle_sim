@@ -23,6 +23,17 @@ func add_row() -> ConstraintRow:
 	return row
 
 
+## Rule check for the constraint's own data. One message per violated rule; empty means valid.
+## The base class has no data to check. SimWorld refuses to add (add_constraint) or to step
+## (preflight) while a constraint reports errors, so invalid input is never silently simulated.
+func validate() -> PackedStringArray:
+	return PackedStringArray()
+
+
+func is_valid() -> bool:
+	return validate().is_empty()
+
+
 ## Prepare for the current step: refresh Jacobians, effective masses, and warm start.
 func prepare(dt: float, config) -> void:
 	_update_rows(dt, config)

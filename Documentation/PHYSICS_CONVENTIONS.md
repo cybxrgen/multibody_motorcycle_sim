@@ -55,6 +55,16 @@ checked by `Tests/test_conventions.gd`.
 - Ball joint: `C = (x_b + r_b) − (x_a + r_a)`, with `r = R · local_anchor`. Rows along world X, Y, Z:
   `Jv_a = −e, Jw_a = −(r_a × e), Jv_b = +e, Jw_b = r_b × e`.
 
+## Hinge joint (M1.1)
+- Frame data per body, local: anchor, unit axis, unit reference direction perpendicular to the axis. Zero angle <=> `R_a*ref_a == R_b*ref_b`. `HingeJoint.from_world(a, b, anchor, axis, reference)` makes the current pose the zero angle. Input is validated, never repaired: unit length / perpendicularity within 1e-6 (8 float32 ulps); valid input is then re-normalized exactly.
+- World frame (A): `a = R_a*axis_a`, `p = R_a*ref_a`, `q = a x p`; `b = R_b*axis_b`.
+- Axis alignment rows: `C_p = p.b`, `C_q = q.b` (sine-type angle error, zero for b = +-a). `Jw_a = p x b`, `Jw_b = b x p` (and q), `bias = (beta/dt) C`. Perpendicular to the axis, so rotation about it is free.
+- Angle: `atan2(w.q, w.p)`, `w = R_b*ref_b`; positive right-handed about +a (B turns counter-clockwise seen from +a relative to A). Continuous: only wrapped differences (`wrapf(d, -PI, PI)`) are accumulated; valid while the relative rotation between two samples is < PI (every step samples). A tilt of b changes it at second order.
+- Hinge-axis rows: `Jw_b = +a, Jw_a = -a` (`Cdot = (w_b - w_a).a`, the angle rate); the upper limit uses the negated pair.
+- Limits (unilateral, impulse in [0, +inf)): lower `C = angle - lower`, upper `C = upper - angle`. Bias `C/dt` while `C >= 0` (speculative: engages only if the limit would be crossed this step, not a correction), `(beta/dt) C` when violated (Baumgarte). Continuous at 0. Lower and upper must be finite, `lower <= upper`; both enabled together.
+- Motor: row bias `-target_speed`; positive speed => positive angle rate (B along +a, A along -a); impulse bound `+-max_torque*dt` (`dt = config.fixed_timestep`); `max_torque = 0` or disabled => bounds [0,0]. Target is first clamped into the rate interval the enabled limit rows admit (`[-bias_lower, +bias_upper]`), so motor and limits never push against each other.
+- Momentum: all rows except the anchor rows are pure equal-and-opposite angular impulses; anchor rows change total angular momentum about the origin by `C x lambda`.
+
 ## Stabilization
 - Velocity-level Baumgarte: `bias = (β/Δt)·C` so the solver drives `Cdot → −(β/Δt) C`, removing a fraction β of the position error per step.
   Purpose: counter *constraint drift* caused by first-order position integration. β = `SimConfig.baumgarte_factor` (default 0.2).

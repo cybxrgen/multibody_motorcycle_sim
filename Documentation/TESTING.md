@@ -33,10 +33,16 @@ or conserved-quantity references use O(dt) tolerances (documented inline in each
   dynamic-dynamic joint, unilateral/clamped rows.
 - `test_momentum.gd`: equal/opposite impulses, constraint impulse symmetry, linear and angular momentum conservation.
 
+- `test_hinge_joint.gd` (M1.1, 44 tests): A basic hinge (static/dynamic, arbitrary orientations, gravity, linear/off-center impulses, axis alignment, free axial rotation via tau/I_pivot, perpendicular rotation constrained, static body unchanged); B angle (zero convention, signs, +-PI continuity, multi-revolution, misalignment second-order, world-orientation independence); C limits (block, inside, away, never pulls outward, dynamic pair, stable under gravity with holding impulse = gravity torque * dt, motor into/away from limits); D motor (acceleration, target under load, cap, cap scaling with dt, disabled, zero torque, signs, static reaction, equal-and-opposite, motor+limits stability); E solver (warm start, limit/motor toggling, linear and angular momentum with the analytic C x lambda term); F input validation (invalid construction, limit/motor settings, world refuses to step, initial misalignment recovery).
+  Tolerances: stop 5e-4 rad (measured arrival error ~1e-4 with >= 100 iterations); anchor drift bounds derived from the Baumgarte steady state `r (w dt)^2/(2 beta)` (doubled) with the peak measured w; spin tests keep w dt <= 0.025 rad (loss ~(w dt)^2); angular momentum compared to the analytic `sum C x lambda` at 2e-4 (float32 over 480 steps). Limit/motor tests use 100 iterations (convergence above). Pre-existing tests and tolerances untouched.
+
 ## Not covered
 - `Scenes/` and `Simulation/Presentation|Debug` have no automated tests (only the headless smoke run); visual inspection via `godot --path .` on a display has not been done.
 
-## Latest verified results (M0.1.1; the M0.1 figures below are kept as history)
+## Latest verified results (M1.1)
+Godot 4.7.stable.official.5b4e0cb0f, headless: baseline 70 passed (1249 checks); final **114 passed, 0 failed, 0 skipped (3529 checks)**, exit 0, 0 `SCRIPT ERROR`. Fresh import exit 0; both scenes 240 frames headless exit 0, no errors. Seven deliberate hinge mutants were each detected by the new tests. Visual inspection: not done. The suite prints expected `ERROR:` lines from deliberate invalid-input tests.
+
+## M0.1.1 results (kept as history)
 - M0.1.1: **70 passed, 0 failed, 0 skipped (1249 checks)**, exit 0, 0 `SCRIPT ERROR`; scenes `simulation_test` and `main` 240 frames headless, exit 0, no errors.
   Starting point was 62/62 (1151 checks). New tests failed before the fix (3 of 8) and pass after.
 

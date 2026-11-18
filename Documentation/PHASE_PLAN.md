@@ -18,8 +18,14 @@ the upload had no `.git`, so a baseline import commit was created first (see HAN
 - [x] AGENTS.md: permanent user delivery gate (one commit, one delivery, wait for the user)
 M1 is **not started**; it requires explicit user authorization.
 
-## Deferred (not part of M0 / M0.1)
-- M1: hinge joint with limits and motors; contact (unilateral) constraints with friction; split-impulse stabilization.
+## Current milestone: M1 — Joints and contacts (IN PROGRESS; branch `m1/hinge-joint`)
+- [x] M1.1 Hinge joint with angular limits and velocity motor (generic constraint, 5 DOF constrained, Baumgarte, warm start)
+- [ ] M1.2 Contact (unilateral) constraints with friction — **pending, not started**
+- [ ] M1.3 Split-impulse stabilization — **pending, not started**
+M1 is NOT complete. M1.2 needs explicit user authorization.
+
+## Deferred (not part of M0 / M0.1 / M1.1)
+- M1 remainder: contact (unilateral) constraints with friction; split-impulse stabilization.
 - M2: motorcycle bodies (chassis, steering, fork, swingarm, wheels), suspension, tire model, drivetrain.
 - M3: rider articulated bodies, joint limits, muscle actuators, grips/seat/pegs.
 - M4: controller layers (intent → rider controller → PD/PID joints), procedural animation, IK.

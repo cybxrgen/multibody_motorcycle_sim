@@ -18,8 +18,9 @@ independent rigid bodies coupled only through constraints. Godot nodes only visu
 | `Simulation/Core/sim_integrator.gd` | Semi-implicit Euler, gyroscopic term, quaternion exponential update | Implemented |
 | `Simulation/Core/sim_world.gd` | Body registry, accumulator-driven fixed stepping, pipeline, diagnostics | Implemented (owns constraints, runs solver; `preflight()` refuses invalid config/bodies, M0.1) |
 | `Simulation/Solver/constraint_row.gd` | Scalar row: Jacobian, bias, softness, effective mass, accumulated impulse, [min,max] limits, warm start, PGS update | Implemented |
-| `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook | Implemented |
+| `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `validate()`/`is_valid()` (default valid, M1.1) | Implemented |
 | `Simulation/Solver/ball_joint_constraint.gd` | Ball joint: 3 rows, Baumgarte bias, anchor queries | Implemented |
+| `Simulation/Solver/hinge_joint_constraint.gd` | Hinge: 8 rows (3 anchor, 2 axis alignment, motor, lower limit, upper limit), continuous angle, torque->impulse cap; extends `SimConstraint`, uses `ConstraintRow` unchanged, solved by the unchanged `ConstraintSolver` | Implemented (M1.1) |
 | `Simulation/Solver/constraint_solver.gd` | prepare -> iterate rows -> finish; generic (no body-type logic) | Implemented |
 | `Simulation/Debug/debug_draw_3d.gd` | Line batcher (ImmediateMesh) | Implemented |
 | `Simulation/Debug/simulation_debug.gd` | World axes, COM markers, local axes, joint anchors, text report | Implemented |
@@ -51,6 +52,12 @@ and the integrator mutate them during a step. External code may apply forces/imp
 - `SimWorld.add_body()` returns null for invalid mass properties. `interpolation_alpha()` returns 0 for an invalid timestep.
 - API changes in M0.1: `SimWorld.step()` now returns bool (was void), `SimRigidBody.set_mass_properties()` returns bool (was void),
   `SimWorld.add_body()` may return null. Existing valid callers are unaffected.
+
+## Constraint validation (M1.1, implemented)
+`SimConstraint.validate()` (empty = valid) is the only generic extension M1.1 needed. `SimWorld.add_constraint()` returns null for a null or invalid constraint, and `preflight()` re-checks every constraint each step (limits, motor settings and frame vectors are mutable): an invalid one refuses the step with no state change, like invalid config/bodies. `BallJointConstraint` inherits the always-valid default; its behavior is unchanged.
+
+## Hinge joint (M1.1)
+Relation to the solver: rows are ordinary `ConstraintRow`s; inactive features (limits/motor off) keep bounds [0,0], so `ConstraintRow.warm_start` clamps any carried impulse to 0 and `solve` applies nothing. No solver or row change. Row layout, Jacobians, biases, angle tracking, limit and motor rules: header of `hinge_joint_constraint.gd` and PHYSICS_CONVENTIONS.md ("Hinge joint"). Rejected: extending `BallJoint` (kept isolated; the 3 anchor rows are duplicated on purpose); an arbitrary perpendicular basis for the axis rows (uses the joint's own reference direction instead, never singular); re-ordering rows (anchor rows last) — measured identical.
 
 ## Execution pipeline (implemented in `SimWorld.step`)
 preflight (M0.1; refuses without side effects) -> capture previous state -> add gravity force (m*g) -> integrate velocities (F/m, gyroscopic alpha) -> constraint
