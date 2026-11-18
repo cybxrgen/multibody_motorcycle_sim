@@ -1,7 +1,10 @@
 # Physics Conventions
 
-These conventions are binding for all simulation code. The ones that depend on Godot behaviour are
-checked by `Tests/test_conventions.gd`.
+**Authoritative for:** units, coordinate frames, quaternion/angular-velocity, mass and inertia, force/impulse, constraint/Jacobian, hinge-joint,
+stabilization, time-stepping and numerical-precision conventions. Binding for all simulation code.
+**Belongs elsewhere:** implementation progress and known limitations → `PROJECT_STATE.md`; module design → `ARCHITECTURE.md`;
+test results and methodology → `TESTING.md`.
+**Update when:** a convention, equation, sign rule or numerical assumption changes. Conventions that depend on Godot behaviour are checked by `Tests/test_conventions.gd`.
 
 ## Units and coordinates
 - SI: m, kg, s, N, N·m, N·s (impulse), kg·m² (inertia).
@@ -25,7 +28,7 @@ checked by `Tests/test_conventions.gd`.
 - `I_world = R · I_local · Rᵀ`, `I_world⁻¹ = R · I_local⁻¹ · Rᵀ`. Recomputed whenever orientation changes.
 - Static body: mass 0, inverse mass 0, inverse inertia = zero matrix. A **finite** mass ≤ 0 means static (the inertia argument is
   ignored). A non-finite mass is invalid, never static.
-- **Validity of a dynamic body's inertia** (`SimMassProperties.validate_inertia`, M0.1): the tensor must be (1) finite,
+- **Validity of a dynamic body's inertia** (`SimMassProperties.validate_inertia`): the tensor must be (1) finite,
   (2) symmetric, (3) positive definite, (4) well conditioned. A positive determinant alone proves none of this
   (e.g. `diag(-1,-1,1)`). Method: normalize by the largest |element| (verdict independent of physical scale), all arithmetic in
   float64; symmetry within 1e-5 of the largest element (~84 float32 ulps: allows R·D·Rᵀ rounding); Cholesky with strictly
@@ -55,8 +58,8 @@ checked by `Tests/test_conventions.gd`.
 - Ball joint: `C = (x_b + r_b) − (x_a + r_a)`, with `r = R · local_anchor`. Rows along world X, Y, Z:
   `Jv_a = −e, Jw_a = −(r_a × e), Jv_b = +e, Jw_b = r_b × e`.
 
-## Hinge joint (M1.1)
-- Frame data per body, local: anchor, unit axis, unit reference direction perpendicular to the axis. Zero angle <=> `R_a*ref_a == R_b*ref_b`. `HingeJoint.from_world(a, b, anchor, axis, reference)` makes the current pose the zero angle. Input is validated, never repaired: unit length / perpendicularity within 1e-6 (8 float32 ulps); valid input is then re-normalized exactly.
+## Hinge joint
+- Frame data per body, local: anchor, unit axis, unit reference direction perpendicular to the axis. Zero angle <=> `R_a*ref_a == R_b*ref_b`. `HingeJointConstraint.from_world(a, b, anchor, axis, reference)` (`hinge_joint_constraint.gd`) makes the current pose the zero angle. Input is validated, never repaired: unit length / perpendicularity within 1e-6 (8 float32 ulps); valid input is then re-normalized exactly.
 - World frame (A): `a = R_a*axis_a`, `p = R_a*ref_a`, `q = a x p`; `b = R_b*axis_b`.
 - Axis alignment rows: `C_p = p.b`, `C_q = q.b` (sine-type angle error, zero for b = +-a). `Jw_a = p x b`, `Jw_b = b x p` (and q), `bias = (beta/dt) C`. Perpendicular to the axis, so rotation about it is free.
 - Angle: `atan2(w.q, w.p)`, `w = R_b*ref_b`; positive right-handed about +a (B turns counter-clockwise seen from +a relative to A). Continuous: only wrapped differences (`wrapf(d, -PI, PI)`) are accumulated; valid while the relative rotation between two samples is < PI (every step samples). A tilt of b changes it at second order.
@@ -68,18 +71,19 @@ checked by `Tests/test_conventions.gd`.
 ## Stabilization
 - Velocity-level Baumgarte: `bias = (β/Δt)·C` so the solver drives `Cdot → −(β/Δt) C`, removing a fraction β of the position error per step.
   Purpose: counter *constraint drift* caused by first-order position integration. β = `SimConfig.baumgarte_factor` (default 0.2).
-- Known limitation: Baumgarte adds/removes a small amount of energy proportional to the error. Split impulses or post-stabilization is deferred.
+- Baumgarte adds/removes a small amount of energy proportional to the error (limitation tracked in `PROJECT_STATE.md`).
 - Distinguish: **numerical error** (integration order), **constraint drift** (anchor separation, bounded by Baumgarte), **physical motion** (swing).
 
 ## Time
 - Fixed timestep default 1/120 s, independent of render rate. Accumulator with frame-time clamp and step cap to avoid a spiral of death.
 - Rendering interpolates between the previous and the published state: `alpha = accumulator / dt`.
 
-## Numerical precision (verified on Godot 4.7.stable.official.5b4e0cb0f)
+## Numerical precision (Godot 4.7)
 - `Vector3`, `Quaternion`, `Basis`, `Transform3D` are **single precision (float32)** in the standard Godot build; GDScript scalar `float` is 64-bit.
   Anything stored in a vector/basis/quaternion (positions, velocities, inertia, orientation) carries ~1e-7 relative error.
 - Inertia validation thresholds above are chosen from this float32 epsilon (1.19e-7); tests use I·I⁻¹ ≈ identity at 1e-5.
 - Test tolerances therefore use >= 1e-6 (relative to magnitude) for vector/basis quantities. Do NOT write 1e-9 tolerances on vector results.
+  Tighter tolerances are legitimate only for float64 scalars (e.g. accumulator and simulation-time arithmetic) or exact discrete solutions computed in float64; see `TESTING.md`.
 - Consequence for future work: long-running or large-coordinate scenes lose position resolution (float32 at 100 m ~ 8e-6 m).
   A double-precision Godot build (`precision=double`) is the migration path if this becomes limiting; record any such decision here.
 - Frame-clamp interplay: `max_frame_time / fixed_timestep` (0.1 s -> 12 steps) exceeds `max_steps_per_frame` (10), so the step cap is
