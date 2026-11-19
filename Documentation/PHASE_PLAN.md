@@ -16,14 +16,14 @@ constraints a vehicle/rider simulation needs, with no motorcycle- or rider-speci
 3. Remaining project-wide limitations are recorded in `PROJECT_STATE.md`.
 Per-milestone acceptance criteria are defined by the assignment that authorizes the milestone.
 
-**Current milestone: none authorized.** M1.1.1 implementation is complete and awaiting user review and acceptance; M1.2 and M1.3 are not authorized and start only on an explicit user assignment.
+**Current milestone: M1.2 (implemented, awaiting user review and acceptance).** M1.3 is not authorized and starts only on an explicit user assignment.
 
 ### Milestones
 | Milestone | Status |
 |---|---|
 | M1.1 Hinge joint with angular limits and velocity motor | Complete (implemented and committed; test results in `PROJECT_STATE.md`) |
-| M1.1.1 Constraint/world body-membership validation | Complete (implemented and committed; verification in `PROJECT_STATE.md`) |
-| M1.2 Contact (unilateral) constraints with friction | Pending — not started |
+| M1.1.1 Constraint/world body-membership validation | Complete (accepted and merged by the user) |
+| M1.2 Contact (unilateral) constraints with friction | Implemented and committed on its own branch; awaiting user review and acceptance (verification in `PROJECT_STATE.md`) |
 | M1.3 Split-impulse stabilization | Pending — not started |
 
 ## Next phase: M2 — Motorcycle

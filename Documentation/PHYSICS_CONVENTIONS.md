@@ -1,7 +1,7 @@
 # Physics Conventions
 
 **Authoritative for:** units, coordinate frames, quaternion/angular-velocity, mass and inertia, force/impulse, constraint/Jacobian, hinge-joint,
-stabilization, time-stepping and numerical-precision conventions. Binding for all simulation code.
+contact and friction, stabilization, time-stepping and numerical-precision conventions. Binding for all simulation code.
 **Belongs elsewhere:** implementation progress and known limitations → `PROJECT_STATE.md`; module design → `ARCHITECTURE.md`;
 test results and methodology → `TESTING.md`.
 **Update when:** a convention, equation, sign rule or numerical assumption changes. Conventions that depend on Godot behaviour are checked by `Tests/test_conventions.gd`.
@@ -68,9 +68,33 @@ test results and methodology → `TESTING.md`.
 - Motor: row bias `-target_speed`; positive speed => positive angle rate (B along +a, A along -a); impulse bound `+-max_torque*dt` (`dt = config.fixed_timestep`); `max_torque = 0` or disabled => bounds [0,0]. Target is first clamped into the rate interval the enabled limit rows admit (`[-bias_lower, +bias_upper]`), so motor and limits never push against each other.
 - Momentum: all rows except the anchor rows are pure equal-and-opposite angular impulses; anchor rows change total angular momentum about the origin by `C x lambda`.
 
+## Contact (`ContactConstraint`)
+One-point contact between two bodies; the caller supplies the geometry and creates, refreshes and removes the constraint (no collision detection exists).
+Several contact points are several independent constraints.
+- **Data.** Anchor on each body (local frame), unit normal `n` in body A's local frame, friction coefficient `mu >= 0`, optional `tangent_rotation`. World: `pa = x_a + R_a*anchor_a`, `pb = x_b + R_b*anchor_b`, `n = R_a*normal_a`. Validated, never repaired: finite anchors, finite nonzero normal of unit length within 1e-6 (valid input is then normalized exactly), finite `mu >= 0`, finite `tangent_rotation`, two different bodies, not both static.
+- **Sign convention.** `n` points from A toward B. Gap `g = n.(pb - pa)`: `g > 0` separated, `g < 0` penetrating. Normal relative velocity `vn = n.(v_b(p) - v_a(p))`: `vn > 0` separating, `vn < 0` approaching.
+- **Shared contact point.** `p = (pa + pb)/2`. All rows use lever arms `r_a = p - x_a`, `r_b = p - x_b`, so the equal-and-opposite impulses act at one point (exact conservation of linear momentum and of angular momentum about any origin, up to float32). A tangential offset between `pa` and `pb` is not constrained.
+- **Caller duty.** Anchors are fixed to the bodies. When the contact patch moves relative to a body (sliding, rolling) the caller must re-seat the anchors, otherwise lever arms and gap drift away from the real contact.
+- **Normal row.** `Jv_a = -n, Jw_a = -(r_a x n), Jv_b = +n, Jw_b = r_b x n`, so `Cdot = vn`. Impulse bounds `[0, +inf)`: it can push, never pull. The row solve enforces `Cdot + bias >= 0`, i.e. `vn >= -bias`.
+  - Speculative, `g >= 0`: require the gap not to become negative, `g + vn*dt >= 0`  =>  `bias = g/dt`. Inactive (zero impulse) unless the bodies would cross within this step. Closing is judged with the current velocities (frozen Jacobian, linear in `vn`).
+  - Penetrating, `g < 0`: Baumgarte, remove a fraction beta of the penetration per step, `g + vn*dt = (1 - beta) g`  =>  `vn = beta|g|/dt`  =>  `bias = (beta/dt) g` (negative, `beta = SimConfig.baumgarte_factor`; no separate parameter). Both branches meet at `g = 0`. Same form as the hinge limits (`C = g`), with the sign fixed by the convention above.
+  - Like every Baumgarte term it adds velocity that is not removed afterwards (bounded by `beta|g|/dt`); split impulses (M1.3) are the planned remedy.
+  - No restitution: contacts are perfectly inelastic in the normal direction.
+- **Friction (isotropic Coulomb).** Tangent rows `t1, t2` have the same Jacobian pattern with `t` instead of `n` and bias 0 (the tangential relative velocity at `p` is driven to zero). With accumulated tangent impulses `lambda_t = (l1, l2)` and normal impulse `lambda_n`: admissible set `|lambda_t| <= mu * lambda_n` (a disk, not a square). Per solver iteration, in this order:
+  1. normal row (clamped to `[0, inf)`);
+  2. block update `y = lambda_t - K^-1 c`, `K_ij = J_i M^-1 J_j^T` (2x2, current inertias), `c = (Cdot_t1, Cdot_t2)`;
+  3. `lambda_t <- argmin_{|x| <= mu*lambda_n} (x - y)^T K (x - y)` (K-metric projection; `y` if already inside; zero if `mu*lambda_n = 0`);
+  4. apply only `lambda_t_new - lambda_t_old`.
+  Because step 3 minimizes the same quadratic as the unconstrained block update, it is the exact block Gauss-Seidel step for the friction subproblem; at a converged sliding contact the friction impulse is antiparallel to the remaining slip (maximum dissipation). A radial (Euclidean) scaling would not have this property when `K` is anisotropic and is therefore not used. Sticking = `y` inside the disk; sliding = boundary active. Static and kinetic friction share one `mu`.
+  Projection: `x(nu) = (K + nu I)^-1 K y` with `|x(nu)|` strictly decreasing in `nu >= 0`; `nu` is found by 60 bisection steps (float64) and the end of the bracket inside the disk is used, so the bound is never exceeded.
+- **Tangent basis.** `e` = world axis with the smallest `|n.e|`; `t1 = normalize(n x e)`, `t2 = n x t1` (right-handed with `n`), then both rotated about `n` by `tangent_rotation`. The block solve and the disk are rotation invariant, so results do not depend on the basis; it can be rebuilt every step.
+- **Warm starting.** Normal impulse: like every row (scaled by `warm_start_factor`, clamped to `[0, inf)`). Friction: stored between steps as a world vector (the basis changes with `n`), scaled by `warm_start_factor`, projected into the current tangent plane, then radially clipped to the disk of radius `mu * (warm-started lambda_n)` before it is applied; so the carried impulse is admissible for the current normal impulse and `mu`. Without warm starting both start at zero.
+- **Momentum.** Every row has `Jv_a = -Jv_b`; the lever arms share `p`. Total linear momentum is conserved, and angular momentum about the origin is conserved up to float32 rounding (spheres in free flight; non-spherical bodies additionally carry the explicit gyroscopic error of the integrator).
+- **Numerical assumptions.** Rows use the Jacobians linearized at the start of the step (see the frozen-Jacobian limitation in `PROJECT_STATE.md`). Tests of a single-row solve use `1e-5` for float32 quantities of order 1.
+
 ## Stabilization
 - Velocity-level Baumgarte: `bias = (β/Δt)·C` so the solver drives `Cdot → −(β/Δt) C`, removing a fraction β of the position error per step.
-  Purpose: counter *constraint drift* caused by first-order position integration. β = `SimConfig.baumgarte_factor` (default 0.2).
+  Purpose: counter *constraint drift* caused by first-order position integration. β = `SimConfig.baumgarte_factor` (default 0.2). Contact penetration uses the same β (see "Contact").
 - Baumgarte adds/removes a small amount of energy proportional to the error (limitation tracked in `PROJECT_STATE.md`).
 - Distinguish: **numerical error** (integration order), **constraint drift** (anchor separation, bounded by Baumgarte), **physical motion** (swing).
 

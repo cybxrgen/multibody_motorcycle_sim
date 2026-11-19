@@ -46,5 +46,14 @@ func _update_rows(_dt: float, _config) -> void:
 	pass
 
 
+## One solver iteration over this constraint. The default solves every row in order (scalar projected Gauss-Seidel).
+## A constraint whose rows are coupled (e.g. contact friction, where two tangent rows share one disk-shaped admissible
+## region that depends on another row's impulse) overrides this to order and project them itself. The solver stays generic:
+## it only calls this hook.
+func solve_iteration() -> void:
+	for row in rows:
+		row.solve()
+
+
 func finish() -> void:
 	pass
