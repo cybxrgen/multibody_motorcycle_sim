@@ -11,7 +11,7 @@ Explicitly authorized by the user. M1.3 and later work were **not** started.
 
 ## 2. Git state
 - Base commit: `b877c008047fe7bcce06b332153c6856c120a00a` (`origin/main` at the time of work, contains the merged M1.1.1, PRs #3 and #4). VERIFIED with `git log`.
-- Work branch: `m1/contact-friction`, one commit "M1.2: implement generic contact constraints with friction". Its hash is in the delivery manifest and the final report (a file cannot contain its own hash). Nothing pushed or merged; `main` untouched. VERIFIED.
+- Work branch: `m1/contact-friction`, one commit "M1.2: implement generic contact constraints with friction" (`2975a6b25fd222005e8419e73198a8eceb1eb2e2`). The agent delivered it locally as a patch and ZIP and did not push or merge. The user subsequently published the branch and opened PR #5 (https://github.com/cybxrgen/multibody_motorcycle_sim/pull/5). PR #5 is awaiting review and user acceptance; it is not accepted and not merged, and `main` does not contain M1.2. VERIFIED against the remote branch and `main`; the PR's open/review state is REPORTED by the user.
 - The previous handoff's statement that M1.1.1 was awaiting review was stale; Git history shows it merged. Reconciled in `PHASE_PLAN.md` and `PROJECT_STATE.md`. VERIFIED.
 
 ## 3. What was done
@@ -36,4 +36,4 @@ Godot was not preinstalled; the official release zip was downloaded and its SHA-
 - Commit signing was configured in the environment; see the final report for whether the commit was signed.
 
 ## 6. Next action
-Stop and wait for the user to apply the patch, publish the branch and review. M1.3 requires a separate explicit assignment.
+Stop and wait for the user's review and acceptance of PR #5. Do not describe M1.2 as accepted or merged until the user says so. M1.3 is not authorized and must not be started; it requires a separate explicit assignment.
