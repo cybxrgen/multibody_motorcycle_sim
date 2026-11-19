@@ -16,9 +16,7 @@ Current maturity: a generic physics foundation with ball and hinge joints and a 
 friction, collision, motorcycle, tire, drivetrain, rider or controller code. See `PHASE_PLAN.md` for what is planned.
 
 ## Repository state
-- VERIFIED: simulator source and tests were last changed by commit `cbc8c83` ("M1.1: implement hinge joint limits and motor"), the
-  baseline for this snapshot. History at the time of writing: `3890313` Initial commit → `7b30ee4` project files → `7bc4dba` M0.1.1 → `cbc8c83` M1.1,
-  all on `main` (= `origin/main`). Later commits are documentation-only unless `git log` shows otherwise.
+- VERIFIED: simulator source and tests were last changed by the M1.1.1 commit ("M1.1.1: validate constraint world membership"), on top of `0fe49f1` (documentation-only workflow commits after M1.1 `cbc8c83`). The hash of the M1.1.1 commit is in the delivery manifest and `HANDOFF.md`.
 - `git log --oneline --decorate` is the source of truth for the current commit; this file does not track documentation-only commits.
 
 ## Capabilities
@@ -31,7 +29,7 @@ friction, collision, motorcycle, tire, drivetrain, rider or controller code. See
 | Semi-implicit Euler, explicit gyroscopic term, quaternion exponential orientation update | Implemented | `SimIntegrator` |
 | Fixed-timestep accumulator (frame clamp, step cap, tolerance `step_tolerance`, interpolation alpha, published/previous state) | Implemented | `SimWorld` |
 | Diagnostics: total linear/angular momentum, kinetic and potential energy | Implemented | `SimWorld` |
-| Input validation: inertia, `SimConfig.validate()`, `SimConstraint.validate()`, `SimWorld.preflight()` (invalid ⇒ no step, no state change) | Implemented | `SimMassProperties`, `SimConfig`, `SimConstraint`, `SimWorld` |
+| Input validation: inertia, `SimConfig.validate()`, `SimConstraint.validate()`, constraint/world body membership (`add_constraint()`, `preflight()`, `remove_body()` also removes the body's constraints), `SimWorld.preflight()` (invalid ⇒ no step, no state change) | Implemented | `SimMassProperties`, `SimConfig`, `SimConstraint`, `SimWorld` |
 | Constraint framework: `ConstraintRow`, `SimConstraint`, `ConstraintSolver` (projected Gauss-Seidel), warm starting, Baumgarte stabilization | Implemented | `Simulation/Solver/` |
 | Ball joint (3 anchor rows); static-body participation | Implemented | `BallJointConstraint` |
 | Hinge joint: 5 constrained DOF, free axis rotation, continuous multi-turn angle, optional lower/upper limits, velocity motor with torque cap | Implemented | `HingeJointConstraint` (8 rows) |
@@ -41,17 +39,13 @@ friction, collision, motorcycle, tire, drivetrain, rider or controller code. See
 | Contacts / friction / collision, split-impulse stabilization | Planned (not started) | `PHASE_PLAN.md` |
 | Motorcycle, suspension, tires, drivetrain, rider, controllers | Planned (not started) | `PHASE_PLAN.md` |
 
-Capabilities above were checked against the source tree at the baseline commit (module files and symbols exist; the test-function count
-matches). Behavioural correctness rests on the reported test results below.
+Capabilities above were checked against the source tree (module files and symbols exist). Behavioural correctness rests on the test results below.
 
 ## Latest verification results
-Environment of the reported runs: Godot 4.7.stable.official.5b4e0cb0f, linux x86_64, headless, no display.
-- VERIFIED (static count, baseline commit): the suite contains 114 `test_*` functions (hinge 44; mass properties 21; rigid body 9; accumulator,
-  config validation, constraints 8 each; conventions 7; rotation 5; momentum 4).
-- REPORTED (by the M1.1 agent, not re-run since): full suite **114 passed, 0 failed, 0 skipped (3529 checks)**, exit 0, no `SCRIPT ERROR`;
-  baseline before M1.1 was 70 passed (1249 checks). Seven deliberate hinge mutations were each caught by the new tests.
-- REPORTED: fresh import (`.godot/` deleted) exit 0, no errors; `Scenes/simulation_test.tscn` and `Scenes/main.tscn` each ran 240 frames headless, exit 0, no errors (smoke only).
-- UNVERIFIED: any run in a Godot-equipped environment after the baseline commit (the environment that produced this documentation had no Godot binary, so nothing was re-run).
+Environment of the runs: Godot 4.7.stable.official.5b4e0cb0f, linux x86_64, headless, no display (official `Godot_v4.7-stable_linux.x86_64`).
+- VERIFIED (M1.1.1 agent): `godot --headless --path . --script res://Tests/run_tests.gd` → **130 passed, 0 failed, 0 skipped (3967 checks)**, exit 0, no `SCRIPT ERROR`. The same suite on the unmodified base `0fe49f1` gave 114 passed (3529 checks). The new `Tests/test_constraint_membership.gd` has 16 tests; run against the original `sim_world.gd` (with only a `has_body` shim) 14 of them fail and a null body causes a script error, with the fix all pass.
+- VERIFIED: fresh import (`.godot/` deleted) `godot --headless --path . --import` exit 0, no error/warning lines; `Scenes/simulation_test.tscn` and `Scenes/main.tscn` each ran 240 frames headless, exit 0, no errors (smoke only).
+- Test-function counts per file are in the suite itself (`grep -c "^func test_" Tests/test_*.gd`); hinge joint 44 of the 130.
 - UNVERIFIED / not done: visual inspection on a graphical display. Camera, colors, debug geometry, HUD and interaction have never been looked at.
   No automated test covers `Scenes/`, `Simulation/Presentation` or `Simulation/Debug`.
 - The suite intentionally prints many `ERROR:` lines from invalid-input tests; failures are only the `[FAIL]` lines and the exit code (see `TESTING.md`).
@@ -83,7 +77,6 @@ Measured values come from earlier agents' experiments and are REPORTED unless re
 
 ### Verification gaps
 - No visual inspection ever performed; presentation/debug code and scenes have no automated tests.
-- Test results above are REPORTED, not re-run in the documentation environment.
 - A GDScript runtime error aborts the whole test run (engine limitation); treat as failure.
 
 ## Important unresolved architectural issues
