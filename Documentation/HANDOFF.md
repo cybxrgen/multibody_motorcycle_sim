@@ -1,35 +1,42 @@
 # Handoff
 
-## Current objective
-M1.1 — hinge joint with angular limits and velocity motor (first subsystem of M1). **M1.2 (contacts/friction) and M1.3 (split impulse) have NOT begun** and need explicit user authorization.
+**Authoritative for:** the current assignment transfer — what the last agent was assigned, did, verified, left open, and what the next agent should do.
+**Belongs elsewhere:** full project state and limitations → `PROJECT_STATE.md`; roadmap → `PHASE_PLAN.md`. Do not duplicate them; reference them.
+**Update when:** every assignment ends (completed or interrupted). Replace this file; never append history (Git is the history).
+Labels: **VERIFIED** (confirmed by inspection/execution), **REPORTED** (stated by an earlier agent, not re-confirmed), **UNVERIFIED** (not checked).
 
-## Branch / commits
-- Branch `m1/hinge-joint`, based on `7bc4dba` (M0.1.1, verified: `SimWorld.step_tolerance` present, 70/70 baseline tests). Nothing pushed or merged; `main` untouched.
-- The uploaded repository has `main`/`origin/main` and no `foundation/simulator-core` branch, and hashes differ from older notes (M0.1.1 was `75eb62b`, now `7bc4dba`): the history was rebuilt with `git init` earlier, content verified by the baseline run. `AGENTS.md` still names `foundation/simulator-core` as the current branch; left untouched (out of scope).
-- M1.1 is a single commit on top of `7bc4dba`; its hash is in the delivery manifest and the final report (a file cannot contain its own hash).
+## 1. Assignment
+Documentation refactoring checkpoint (documentation only): establish the seven-document structure with clear ownership, remove contradictions, and add a fresh-agent
+handoff procedure. M1.1.1, M1.2 and M1.3 were **not** started; no simulator code, tests, scenes or configuration were changed.
 
-## M1.1 implemented
-- `Simulation/Solver/hinge_joint_constraint.gd`: 8 scalar rows (3 anchor, 2 axis alignment, motor, lower limit, upper limit). Details and sign conventions: file header, PHYSICS_CONVENTIONS.md.
-- Continuous angle: accumulated wrapped differences, no jump at +-PI, multi-revolution. Limits: unilateral rows, speculative bias inside the range, Baumgarte when violated. Motor: velocity row, bounds `+-max_torque*dt`, target clamped into the limit-admitted rate interval (prevents fighting).
-- Generic extension (only one): `SimConstraint.validate()`; `SimWorld.add_constraint()` rejects invalid constraints; `preflight()` refuses steps while one is invalid. Ball joint unchanged.
-- No change to solver, rows, integrator, `SimConfig`, defaults, or any existing test.
+## 2. Git state
+- Base commit: `cbc8c83` ("M1.1: implement hinge joint limits and motor"), which was `main` = `origin/main`. VERIFIED.
+- Work branch: `documentation/authoritative-structure`, one commit titled "Docs: establish authoritative documentation structure" on top of the base; its hash is in the delivery manifest and the final report (a file cannot contain its own hash). Nothing pushed or merged; `main` untouched. VERIFIED.
+- Working tree after the commit: clean. VERIFIED.
 
-## Decisions / rejected
-- Frame defined by an explicit reference direction per body; `from_world()` makes the creation pose angle 0.
-- Rejected: wrapped atan2 as state; arbitrary perpendicular basis; row re-ordering (measured no effect); extending BallJoint; damping/more iterations as a fix.
-- Both limits enabled by one flag, finite bounds only.
+## 3. What was done
+- `AGENTS.md`: rewritten as permanent rules only: documentation map with ownership matrix and change→document table, mandatory update procedure, startup routine, scope, architecture/physics rules, testing, Git, delivery gate and format, handoff, handling of unverified information. Removed branch/status statements.
+- `PROJECT_STATE.md`: one snapshot — capability table (implemented / planned / visually unverified), repository state, verification results with labels, consolidated and de-duplicated project-wide limitations, unresolved architectural issues.
+- `PHASE_PLAN.md`: one current phase (M1), one current milestone (M1.1.1, pending, not authorized), milestone table, next-phase objective (M2). Removed the contradictory "M0 current / M1 not started / M1 in progress" blocks and M0/M0.1 archive.
+- `ARCHITECTURE.md`: status columns and milestone tags removed; decisions D1–D9 with rejected options; stale "failed approaches: none yet" removed.
+- `PHYSICS_CONVENTIONS.md`: purpose header, milestone tags removed, tolerance-policy cross-reference; equations and conventions otherwise unchanged.
+- `TESTING.md`: methodology only (commands, conventions, coverage map, verification levels, interpretation, past lessons); per-milestone result reports and stale hashes removed (results now live in `PROJECT_STATE.md`).
 
-## Tests actually executed (Godot 4.7.stable.official.5b4e0cb0f, headless)
-- Baseline before changes: 70 passed (1249 checks). Final: **114 passed, 0 failed, 0 skipped (3529 checks)**; 44 new in `Tests/test_hinge_joint.gd`. Seven deliberate hinge mutations (axis rows off, motor sign, bilateral limit, uncapped-by-dt motor, no unwrapping, no speculative bias, no motor clamp) were each caught.
-- Fresh import (`.godot` deleted): exit 0, no errors. `simulation_test.tscn` and `main.tscn`, 240 frames headless: exit 0, no errors. **No visual inspection on a display was done.**
+## 4. Verification performed
+- VERIFIED: Git state (`git status`, branch, `git log --all`); test-function count in `Tests/` is 114, matching the reported total; documented symbols and files exist in source (`SimConfig.validate`, `SimWorld.preflight/add_constraint`, `SimConstraint.validate`, `HingeJointConstraint` row constants, `step_tolerance`, scene controls, no `class_name` or Godot physics nodes).
+- VERIFIED: only the seven documentation files differ from the base commit (`git diff --name-only`).
+- VERIFIED: manual cross-read of all seven documents for contradictory phase/milestone/limitation/branch statements, and a fresh-agent review using only the repository documents.
+- NOT done: any Godot run. The environment had no Godot binary, so the suite, import and scene runs were not repeated; test results in `PROJECT_STATE.md` remain REPORTED.
 
-## Known limitations (measured; details in PROJECT_STATE.md)
-- Limit stop convergence needs ~80 solver iterations (residual separation speed after a 3 rad/s impact: 10% at the default 20, 1.5% at 40, 0 at >= 80); the stop never penetrates.
-- Free spin loses rate ~(w dt)^2 (the M0 frozen-Jacobian limit): 0.5% over 5 s at 3 rad/s, ~4% at 6 rad/s.
-- Anti-parallel axes (b = -a) also satisfy the axis rows; angle tracker needs < PI relative rotation per sample.
+## 5. Discrepancies found (resolved in the documents unless noted)
+- The previous `HANDOFF.md` named branch `m1/hinge-joint` and `AGENTS.md` named `foundation/simulator-core`; neither exists. VERIFIED: only `main`/`origin/main` existed, and M1.1 and earlier commits are on `main`.
+- Old notes cited commits (`75eb62b`, `0907991`, `f691adf`) that are not in the current history (history was rebuilt earlier, REPORTED). Removed as stale.
+- `README.md` contains only a one-line title. Not one of the seven documents and left untouched; the user may want to decide its role.
+- Scope of M1.1.1 is not defined anywhere in the repository (UNVERIFIED what the user intends); the plan records it as pending and unauthorized rather than inventing a scope.
 
-## Exact next step (only after user authorization)
-User review of this checkpoint; then M1.2 (contact constraints with friction), reusing the unilateral-row and speculative-bias pattern if appropriate.
+## 6. Known limitations specific to this assignment
+- Test and runtime results are REPORTED, not re-run (no Godot available here).
+- Project-wide limitations are in `PROJECT_STATE.md`.
 
-## Delivery
-Three separate files from `Tools/make_delivery.sh <commit>`: `motorcycle_multibody_<short>.zip`, `_manifest.txt`, `.sha256`. Work stops after delivery (see `AGENTS.md`).
+## 7. Next action
+Stop and wait. The user reviews this documentation checkpoint and, if satisfied, defines and authorizes the separate M1.1.1 hardening checkpoint. Do not start M1.1.1, M1.2 or M1.3 without that explicit assignment. In a Godot-equipped environment the next agent should first re-run the suite and import (`TESTING.md`) to turn the REPORTED results into VERIFIED ones.

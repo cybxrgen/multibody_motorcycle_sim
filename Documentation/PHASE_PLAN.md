@@ -1,33 +1,36 @@
 # Phase Plan
 
-## Current milestone: M0 — Simulator foundation (branch `foundation/simulator-core`)
-- [x] C1 Scaffold, rules, docs, test infrastructure, delivery tooling
-- [x] C2 Rigid body, mass properties, integrator, fixed-step world
-- [x] C3 Constraint rows, PGS solver, ball joint
-- [x] C4 Minimal visualization
+**Authoritative for:** the one current development phase, the one current milestone, the remaining work in this phase, and the next-phase objective.
+**Belongs elsewhere:** what exists today and verified results → `PROJECT_STATE.md`; the last assignment's report → `HANDOFF.md`;
+design → `ARCHITECTURE.md`. Completed phases and past milestones live only in Git history; do not archive them here.
+**Update when:** a milestone's status changes. When a phase completes, **replace** this document's content with the next phase's plan.
+A milestone being listed here is **not** authorization to start it: work begins only on an explicit user assignment (`AGENTS.md`).
 
-**M0 complete and verified headless on Godot 4.7.stable (40/40 tests at M0; 62/62 after M0.1). Visual inspection on a display has not been done (see PROJECT_STATE.md).**
+## Current phase: M1 — Joints and contacts (in progress)
+**Objective:** extend the generic constraint solver (rows, projected Gauss-Seidel, warm start, Baumgarte) with the joint and unilateral
+constraints a vehicle/rider simulation needs, with no motorcycle- or rider-specific logic in the core.
 
-## Checkpoint: M0.1 — Foundation hardening (not M1)
-Maintenance only; no solver, integrator or physics-default changes. Baseline: uploaded M0 snapshot (reported commit `0907991`);
-the upload had no `.git`, so a baseline import commit was created first (see HANDOFF.md).
-- [x] Fix A: inertia tensor validation (finite, symmetric, positive definite via Cholesky, condition number; scale-aware; invalid state observable)
-- [x] Fix B: `SimConfig.validate()` and `SimWorld.preflight()` (no partial steps; `advance()` and `step()` protected)
-- [x] Fix C: documentation made consistent (verification levels separated)
-- [x] Fix D: `make_delivery.sh` verifies ZIP/checksum/manifest; sidecars kept outside the ZIP
-- [x] AGENTS.md: permanent user delivery gate (one commit, one delivery, wait for the user)
-M1 is **not started**; it requires explicit user authorization.
+**Phase acceptance criteria** (M1 is complete only when all hold):
+1. M1.1, M1.2 and M1.3 are each implemented, verified by headless tests with physically justified tolerances, documented in their owning documents, delivered, and accepted by the user.
+2. Core and solver remain generic (`AGENTS.md` §4); no built-in Godot physics is used as authority.
+3. Remaining project-wide limitations are recorded in `PROJECT_STATE.md`.
+Per-milestone acceptance criteria are defined by the assignment that authorizes the milestone.
 
-## Current milestone: M1 — Joints and contacts (IN PROGRESS; branch `m1/hinge-joint`)
-- [x] M1.1 Hinge joint with angular limits and velocity motor (generic constraint, 5 DOF constrained, Baumgarte, warm start)
-- [ ] M1.2 Contact (unilateral) constraints with friction — **pending, not started**
-- [ ] M1.3 Split-impulse stabilization — **pending, not started**
-M1 is NOT complete. M1.2 needs explicit user authorization.
+**Current milestone: M1.1.1 — M1.1 hardening checkpoint. Status: PENDING, NOT AUTHORIZED.**
+Its scope is not defined anywhere in the repository; the user must define and authorize it. No development milestone is currently authorized.
 
-## Deferred (not part of M0 / M0.1 / M1.1)
-- M1 remainder: contact (unilateral) constraints with friction; split-impulse stabilization.
-- M2: motorcycle bodies (chassis, steering, fork, swingarm, wheels), suspension, tire model, drivetrain.
-- M3: rider articulated bodies, joint limits, muscle actuators, grips/seat/pegs.
-- M4: controller layers (intent → rider controller → PD/PID joints), procedural animation, IK.
+### Milestones
+| Milestone | Status |
+|---|---|
+| M1.1 Hinge joint with angular limits and velocity motor | Complete (implemented and committed; test results in `PROJECT_STATE.md`) |
+| M1.1.1 Hardening checkpoint for M1.1 | **Pending** — awaiting user review and authorization |
+| M1.2 Contact (unilateral) constraints with friction | Pending — not started |
+| M1.3 Split-impulse stabilization | Pending — not started |
 
-Dependencies: M1 needs M0 solver; M2 needs M1 joints+contacts; M3 needs M1 and M2 interfaces; M4 needs M3.
+## Next phase: M2 — Motorcycle
+**Objective:** build the motorcycle as independent rigid bodies coupled only through M1 joints and contacts: chassis, steering/fork, swingarm, wheels,
+suspension, tire model and drivetrain. Requires M1 complete.
+
+## Later phases (outline only; not planned in detail)
+- M3 — Rider: articulated rider bodies, joint limits, muscle actuators, grips/seat/pegs. Needs M1 and M2 interfaces.
+- M4 — Control: controller layers (intent → rider controller → PD/PID joints), procedural animation, IK. Needs M3.

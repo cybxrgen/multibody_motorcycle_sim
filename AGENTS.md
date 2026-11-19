@@ -1,74 +1,129 @@
-# AGENTS.md — Permanent rules for every agent working on this repository
+# AGENTS.md — Permanent operating rules for every agent
 
-Project: custom rigid-body / constraint physics foundation (Godot 4.7, GDScript) for a
-motorcycle + rider multibody simulator. The custom simulator is the **only** physical authority.
+**Authoritative for:** how any agent must work in this repository (startup, scope, Git, testing, delivery, handoff,
+documentation upkeep) and which document owns which information.
+**Belongs elsewhere:** current status, milestones, test results, findings → `PROJECT_STATE.md`, `PHASE_PLAN.md`, `HANDOFF.md`.
+**Update when:** a permanent agent workflow rule changes — and only then. This file never carries temporary status.
 
-## Mandatory start-of-work routine
-1. Read this file, `Documentation/HANDOFF.md`, `Documentation/PROJECT_STATE.md`, `Documentation/ARCHITECTURE.md`
-   (and `PHYSICS_CONVENTIONS.md` before touching any math).
-2. `git branch --show-current`, `git log --oneline -20`, `git status`.
-3. Inspect the code before changing it. **Never trust a previous agent's claims** — re-run the tests and verify.
-4. State the exact current state and open issues before starting.
+Project: custom rigid-body / constraint physics foundation (Godot 4.7, GDScript) for a motorcycle + rider multibody
+simulator. The custom simulator is the **only** physical authority.
 
-## Architectural principles
+## 1. Documentation map and ownership
+
+All project documentation is the seven files below (this file included). Do not create further documentation files,
+archives or decision logs unless a concrete need is justified to the user first.
+
+| Document | Purpose | Owns | Does not own |
+|---|---|---|---|
+| `AGENTS.md` | Permanent agent rules | Workflow, scope, Git, testing, delivery, doc rules, ownership matrix | Current project status |
+| `Documentation/PROJECT_STATE.md` | Canonical current state | What exists, latest verified results, project-wide limitations and debt | Future roadmap, assignment diary |
+| `Documentation/PHASE_PLAN.md` | Current roadmap | Current phase and milestone, remaining work, next-phase objective | Historical milestone archive (Git is the archive) |
+| `Documentation/HANDOFF.md` | Current assignment transfer | What the last assignment did, how it was verified, next action | Permanent project state, full roadmap |
+| `Documentation/ARCHITECTURE.md` | Stable system architecture | Modules, dependencies, data flow, boundaries, design decisions and rationale | Temporary task status |
+| `Documentation/PHYSICS_CONVENTIONS.md` | Physics and math conventions | Units, frames, quaternions, inertia, Jacobians, solver and numerical assumptions | Implementation progress, test results |
+| `Documentation/TESTING.md` | Verification methodology | Suite layout, test-writing rules, commands, verification levels, how to read results | Duplicated test reports |
+
+### Which documents a change must update
+
+| Change | Required documentation |
+|---|---|
+| New implemented capability | `PROJECT_STATE.md` + the relevant technical docs (`ARCHITECTURE.md`, `PHYSICS_CONVENTIONS.md`, `TESTING.md`) |
+| Milestone status change | `PHASE_PLAN.md` |
+| Assignment completed or interrupted | `HANDOFF.md` (replace it; do not append) |
+| Persistent project limitation discovered or resolved | `PROJECT_STATE.md` |
+| Physics convention changed | `PHYSICS_CONVENTIONS.md` |
+| Architectural decision changed | `ARCHITECTURE.md` |
+| Test methodology changed | `TESTING.md` |
+| Permanent agent workflow changed | `AGENTS.md` |
+
+Do not touch an unrelated document just to look comprehensive. Record the latest verified test numbers only in
+`PROJECT_STATE.md` and `HANDOFF.md`, never in the technical documents.
+
+### Documentation update procedure (mandatory)
+1. Read the existing documentation before implementing.
+2. Decide which documents the assignment can legitimately affect (table above).
+3. Keep implementation and documentation synchronized.
+4. Edit documentation only after the implementation and verification results are known.
+5. Remove outdated statements; never append a contradictory correction below an old statement.
+6. Never claim a test, commit, runtime check or visual inspection that was not performed.
+7. Cross-reference instead of duplicating (link the owning document).
+8. Make the final `HANDOFF.md` agree with the actual Git state (`git branch --show-current`, `git log`, `git status`).
+9. Before delivery, read all seven documents together and search for contradictions (phase/milestone declarations, limitations, counts, branch and commit statements).
+10. Documentation must never describe functionality that does not exist. Avoid dates, commit hashes, test counts and branch names outside
+    the documents that own them (`PROJECT_STATE.md`, `HANDOFF.md`); a file cannot contain the hash of its own commit.
+
+Every document starts with a short statement of what it is authoritative for, what belongs elsewhere and when to update it. Keep it.
+Record failed or rejected approaches with reasons in the owning technical document so they are not retried blindly.
+
+## 2. Mandatory start-of-work routine
+1. Read, in order: this file, `Documentation/HANDOFF.md`, `Documentation/PROJECT_STATE.md`, `Documentation/PHASE_PLAN.md`,
+   `Documentation/ARCHITECTURE.md`, `Documentation/PHYSICS_CONVENTIONS.md`, `Documentation/TESTING.md`.
+2. Inspect the real repository: `git status`, `git branch --show-current`, `git log --oneline --decorate -20`.
+3. **If the working tree is dirty, stop and report it. Never modify or discard another party's uncommitted work.**
+4. Inspect the code before changing it. Do not trust documentation or a previous agent's claims blindly: `HANDOFF.md` labels
+   claims VERIFIED / REPORTED / UNVERIFIED; re-verify what your work depends on (re-run the test suite before changing simulator code, if Godot is available).
+5. State the exact current state, the authorized assignment and open issues before starting.
+6. Do only what the current assignment authorizes (next section).
+
+## 3. Scope discipline
+- The user's current assignment defines scope. Being listed in `PHASE_PLAN.md` is **not** authorization: pending milestones start only on explicit user instruction.
+- Do not expand scope, refactor unrelated code, or add placeholder systems for future subsystems.
+- A documentation-only assignment changes only documentation: no simulator source, solver behaviour, tests or expectations, scenes, assets, project configuration or dependencies. If tooling changes seem necessary, explain why and ask first.
+- Do not change Git history, merge, or push.
+
+## 4. Architectural and physics rules (do not violate)
+Details and rationale: `ARCHITECTURE.md`, `PHYSICS_CONVENTIONS.md`.
 - Physical state is owned by `SimWorld` / `SimRigidBody`. Godot nodes are visual/debug/UI only.
 - No `RigidBody3D`, `Generic6DOFJoint3D`, `PhysicalBone3D`, or any built-in physics as authority.
-- The physics core (`Simulation/Core`, `Simulation/Solver`) extends `RefCounted`, never touches the scene tree.
-- Solver and bodies are generic. No motorcycle/rider special cases anywhere in the core.
+- The physics core (`Simulation/Core`, `Simulation/Solver`) never touches the scene tree (`RefCounted`-based; `SimConfig` is a `Resource`).
+- Solver and bodies are generic. No motorcycle/rider special cases in the core.
 - Never merge a rider's mass into a motorcycle body while also simulating the rider separately.
-- SI units, right-handed, +Y up, local -Z forward, +X right. Quaternions for orientation.
-- No arbitrary damping, hidden corrective forces, or position teleportation to hide solver problems.
-  Every stabilization term needs a documented mathematical purpose.
-- Numerical parameters live in `SimConfig` (`Simulation/Core/sim_config.gd`), not scattered in scripts. Their validity rules live in
-  `SimConfig.validate()` only; `SimWorld` refuses to step while the config or any body's mass properties are invalid.
-- No `class_name` globals: scripts reference each other with `preload("res://...")` constants so the project
-  works headless without an editor import step (no `.godot` cache needed).
-- Do not expand scope or add empty placeholder systems for future subsystems.
+- SI units, right-handed, +Y up, local −Z forward, +X right. Quaternions for orientation.
+- No arbitrary damping, hidden corrective forces, or position teleportation to hide solver problems. Every stabilization term needs a documented mathematical purpose.
+- Numerical parameters live in `SimConfig` (`Simulation/Core/sim_config.gd`); their validity rules live in `SimConfig.validate()` only. `SimWorld` refuses to step while config, any body's mass properties, or any constraint is invalid.
+- No `class_name` globals: scripts reference each other with `preload("res://...")` constants so the project works headless without an editor import step.
+- Commit the `*.uid` files Godot generates next to scripts. Never commit `.godot/`.
 
-## Testing requirements
-- Run before every commit:
-  `godot --headless --path . --script res://Tests/run_tests.gd`
-- Tests must validate physical outcomes with justified tolerances, not merely that code runs.
-- Report failures honestly; never loosen a tolerance just to pass without recording why.
-- If Godot is unavailable, say so explicitly everywhere (commit notes, manifests, handoff). Never claim a run that did not happen.
+## 5. Testing and verification
+Methodology, commands and verification levels: `TESTING.md`. Binding rules:
+- Run the full headless suite before every commit that changes simulator code or tests.
+- Tests validate physical outcomes with justified tolerances, not merely that code runs. Never loosen a tolerance without recording why in the test and in `TESTING.md` if the policy changes.
+- Report failures honestly. If Godot is unavailable, say so everywhere (commit notes, manifest, handoff) and never claim a run that did not happen.
+- Keep import/parse, headless runtime and visual inspection distinct; claim only the level actually reached.
+- A documentation-only commit does not require a simulator test rerun; do not claim new test results for it.
 
-## Repository workflow
-- Work on a feature branch (current: `foundation/simulator-core`). Never commit to `main`.
-- Never push, never merge into `main`, never discard other people's uncommitted work.
-- Each assignment ends in a coherent, testable commit with its documentation updated. Do not create intermediate commits
-  for individual fixes unless the assignment explicitly allows several commits.
-- Inspect `git diff` and `git status` before committing; no accidental files.
+## 6. Git rules
+- Work on a dedicated local branch (name given by the assignment; otherwise a descriptive one). Never commit to `main`.
+- Never push, never merge, never rewrite history, never discard anyone's uncommitted work.
+- Each assignment ends in **one** coherent commit with its documentation updated, unless the assignment explicitly allows several. No intermediate commits for individual fixes.
+- Inspect `git diff` and `git status` before committing; no accidental files. Commit messages state what changed, not what was merely intended.
 
-## User delivery gate (permanent, applies to every agent and every assignment)
-- **A commit is not permission to begin the next commit.** A completed implementation commit is a user review checkpoint.
-- After the commit, in this order: generate the ZIP, manifest and SHA-256 with `Tools/make_delivery.sh` from that exact
-  commit; verify them; **share all three files with the user through a working user-accessible mechanism** (attachment or
-  download); write the final report; **stop**.
-- Then wait for the user's explicit instruction. The user decides when the next milestone or commit begins; a new
-  assignment or explicit instruction is required before any further implementation.
-- The user must be able to inspect, archive, download and independently preserve each completed project state.
-- Agents must never:
-  - create several commits consecutively without delivering the intermediate snapshots;
-  - announce that a ZIP is complete and immediately proceed into the next commit;
-  - keep implementing another milestone after the latest delivery has been generated;
-  - treat an artifact inside an isolated sandbox as delivered to the user (printing a sandbox path is not delivery
-    unless that path is exposed through a working download mechanism);
-  - claim that a file was shared when only an internal path was printed. If the environment cannot publish artifacts,
-    report that limitation honestly and stop.
-- Never modify the project or a ZIP after its checksum was computed. Any change means a new commit (or, for a defect in
-  the delivery itself, regenerating all three files) and full re-verification.
+## 7. User delivery gate (permanent)
+- **A commit is not permission to begin the next commit.** A completed commit is a user review checkpoint.
+- After the commit, in this order: generate ZIP, manifest and SHA-256 with `Tools/make_delivery.sh <commit> ...` from that exact commit;
+  verify them; **share all three files with the user through a working user-accessible mechanism** (attachment or download);
+  write the final report; **stop**.
+- Wait for explicit user instruction. A new assignment is required before any further work.
+- Agents must never: create several commits consecutively without delivering intermediate snapshots; announce a ZIP and proceed to the next
+  commit; keep implementing after the delivery was generated; treat a path inside an isolated sandbox as delivered; claim a file was shared when only an internal path was printed. If the environment cannot publish artifacts, say so and stop.
+- Never modify the project or a ZIP after its checksum was computed. Any change means a new commit (or, for a defect in the delivery itself, regenerating all three files) and full re-verification.
 
-## Delivery requirements (every delivery)
-- Run `Tools/make_delivery.sh <commit> ...` to produce, from that exact commit via `git archive`, three **separate** files in
-  `deliveries/` (git-ignored): `motorcycle_multibody_<short>.zip`, `motorcycle_multibody_<short>_manifest.txt`,
-  `motorcycle_multibody_<short>.sha256`. The manifest and checksum are never packed inside the ZIP.
-- The ZIP has the single root `motorcycle_multibody/` and contains exactly the committed files (no `.git`, `.godot`).
-- The script verifies CRC, the commit stamp, the file list, the SHA-256 (`sha256sum -c`) and manifest consistency.
-  `DELIVERY_COPY_DIR=<dir>` copies the files to a user-visible location and re-verifies them there.
+### Delivery format (every delivery)
+- `Tools/make_delivery.sh <commit> ["<milestone>" "<tests executed>" "<test results>" "<known limitations>" "<godot status>"]` writes three
+  **separate** files to `deliveries/` (git-ignored): `motorcycle_multibody_<short>.zip`, `motorcycle_multibody_<short>_manifest.txt`,
+  `motorcycle_multibody_<short>.sha256`. Manifest and checksum are never inside the ZIP.
+- The ZIP is built by `git archive` from that exact commit: single root `motorcycle_multibody/`, exactly the committed files, no `.git`/`.godot`.
+- The script verifies CRC, commit stamp, file list, SHA-256 (`sha256sum -c`) and manifest consistency. `DELIVERY_COPY_DIR=<dir>` copies the files to a user-visible location and re-verifies them there.
+- Fill the optional manifest arguments honestly (what was and was not executed); the defaults state that Godot was not verified.
 
-## Documentation upkeep
-Update `HANDOFF.md`, `PROJECT_STATE.md`, `ARCHITECTURE.md`, `PHASE_PLAN.md`, `TESTING.md` (and `PHYSICS_CONVENTIONS.md` for math/precision rules) whenever behaviour changes.
-All documents must describe the same actual state. Distinguish import/parse, headless runtime and visual inspection; claim only what was actually done; mark unknowns as unverified.
-Documentation must never describe functionality that does not exist. Record failed approaches and decisions with reasons.
-- Commit the `*.uid` files Godot generates next to scripts (stable resource references). Never commit `.godot/`.
-- Godot 4.7 binary used for verification: `Godot_v4.7-stable_linux.x86_64` from godotengine/godot-builds release `4.7-stable`. Run `--import` once after a fresh checkout. Vector/Basis/Quaternion are float32: use tolerances >= 1e-6.
+## 8. Handoff requirements
+At the end of every assignment (completed or interrupted) replace `Documentation/HANDOFF.md` with one current handoff that answers:
+what was assigned, what was actually accomplished, what was verified and how, what remains unresolved or blocked, and what the next agent should do.
+Use the labels VERIFIED (confirmed by inspection/execution), REPORTED (stated by a previous agent, not re-confirmed), UNVERIFIED (not checked).
+Format and content rules are in `HANDOFF.md`'s own header.
+
+## 9. Missing, contradictory or unverified information
+- Establish the truth from source code, tests, Git history or actual execution before editing documentation.
+- If it cannot be established, record the uncertainty explicitly (UNVERIFIED / REPORTED) instead of inventing an answer, and tell the user.
+- Never silently "fix" a discrepancy by deleting one side of it without evidence; resolve it, then remove the outdated statement.
+- If the assignment contradicts these rules, follow this file and explain the discrepancy to the user.
