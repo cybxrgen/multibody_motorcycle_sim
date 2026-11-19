@@ -16,14 +16,13 @@ constraints a vehicle/rider simulation needs, with no motorcycle- or rider-speci
 3. Remaining project-wide limitations are recorded in `PROJECT_STATE.md`.
 Per-milestone acceptance criteria are defined by the assignment that authorizes the milestone.
 
-**Current milestone: M1.1.1 — M1.1 hardening checkpoint. Status: PENDING, NOT AUTHORIZED.**
-Its scope is not defined anywhere in the repository; the user must define and authorize it. No development milestone is currently authorized.
+**Current milestone: none authorized.** M1.1.1 is complete (awaiting user review and publication); M1.2 and M1.3 start only on an explicit user assignment.
 
 ### Milestones
 | Milestone | Status |
 |---|---|
 | M1.1 Hinge joint with angular limits and velocity motor | Complete (implemented and committed; test results in `PROJECT_STATE.md`) |
-| M1.1.1 Hardening checkpoint for M1.1 | **Pending** — awaiting user review and authorization |
+| M1.1.1 Constraint/world body-membership validation | Complete (implemented and committed; verification in `PROJECT_STATE.md`) |
 | M1.2 Contact (unilateral) constraints with friction | Pending — not started |
 | M1.3 Split-impulse stabilization | Pending — not started |
 

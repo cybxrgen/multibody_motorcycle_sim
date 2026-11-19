@@ -48,14 +48,34 @@ func add_body(body: SimRigidBody) -> SimRigidBody:
 	return body
 
 
+## Removes the body and, first, every registered constraint that references it (as body_a or body_b), so the world never
+## holds a constraint whose body is absent. Chosen over refusing the removal because remove_body() has no failure channel
+## (void, like remove_constraint) and a constraint is meaningless without both bodies. Constraints between other bodies
+## and their order are untouched. Removing a body that is not a member of this world does nothing.
 func remove_body(body: SimRigidBody) -> void:
+	if not has_body(body):
+		return
+	for i in range(constraints.size() - 1, -1, -1):
+		var c: SimConstraint = constraints[i]
+		if c.body_a == body or c.body_b == body:
+			constraints.remove_at(i)
 	bodies.erase(body)
 
 
-## Returns the constraint, or null (with an error) if it is null or reports invalid data (SimConstraint.validate()).
+## True if `body` is a registered member of this world. Object identity only: never body ids or property equality.
+func has_body(body: SimRigidBody) -> bool:
+	return body != null and bodies.has(body)
+
+
+## Returns the constraint, or null (with an error) if it is null, references a body that is null or not registered in this
+## world (identity check, any SimConstraint subclass), or reports invalid data (SimConstraint.validate()).
 func add_constraint(constraint: SimConstraint) -> SimConstraint:
 	if constraint == null:
 		push_error("SimWorld.add_constraint: rejected null constraint.")
+		return null
+	var membership_error: String = _membership_error(constraint)
+	if membership_error != "":
+		push_error("SimWorld.add_constraint: rejected constraint: %s." % membership_error)
 		return null
 	var errors: PackedStringArray = constraint.validate()
 	if not errors.is_empty():
@@ -69,7 +89,19 @@ func remove_constraint(constraint: SimConstraint) -> void:
 	constraints.erase(constraint)
 
 
-## Checks that the world can be stepped: valid configuration, valid body mass properties and valid constraints.
+## "" if both bodies of the constraint are registered in this world, otherwise a description of the violation.
+func _membership_error(constraint: SimConstraint) -> String:
+	if constraint.body_a == null or constraint.body_b == null:
+		return "body_a or body_b is null"
+	if not has_body(constraint.body_a):
+		return "body_a is not registered in this world"
+	if not has_body(constraint.body_b):
+		return "body_b is not registered in this world"
+	return ""
+
+
+## Checks that the world can be stepped: valid configuration, valid body mass properties, valid constraints, and every
+## constraint's bodies still registered in this world (defensive: bodies/constraints are public and may be edited directly).
 ## Pure check except for diagnostics (last_error, one push_error per distinct failure message).
 ## SimConfig is a mutable Resource, so this runs at the start of every advance() and step().
 func preflight() -> bool:
@@ -88,6 +120,10 @@ func preflight() -> bool:
 			if message == "":
 				# Constraint data is mutable (limits, motor settings, anchors), so it is re-checked every step.
 				for i in constraints.size():
+					var membership_error: String = _membership_error(constraints[i])
+					if membership_error != "":
+						message = "constraint %d violates world membership: %s" % [i, membership_error]
+						break
 					var constraint_errors: PackedStringArray = constraints[i].validate()
 					if not constraint_errors.is_empty():
 						message = "constraint %d is invalid: %s" % [i, "; ".join(constraint_errors)]

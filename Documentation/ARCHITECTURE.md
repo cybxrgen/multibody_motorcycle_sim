@@ -54,10 +54,10 @@ energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve i
 - Rules live in two places only: `SimConfig.validate()` (parameters) and `SimMassProperties.validate_inertia()` plus the constructor (mass/inertia);
   constraints validate their own data in `SimConstraint.validate()` (empty = valid). Rules: `PHYSICS_CONVENTIONS.md` (inertia), `sim_config.gd` (config ranges). Nothing is clamped or repaired.
 - `SimWorld.preflight()` runs at the start of **every** `advance()` and `step()` (`SimConfig` and constraint data are mutable after construction). If the
-  config (or a null config), any body's mass properties, or any constraint is invalid: `advance()` returns 0, `step()` returns false, **no state is touched**
+  config (or a null config), any body's mass properties, any constraint's data, or any constraint's world membership is invalid: `advance()` returns 0, `step()` returns false, **no state is touched**
   (accumulator, bodies, force accumulators, step count, time), `rejected_step_count` increments, `last_error` holds the reason, and `push_error` fires once per
   distinct message (not per call). Fixing the cause resumes simulation.
-- `SimWorld.add_body()` returns null for invalid mass properties; `SimWorld.add_constraint()` returns null for a null or invalid constraint.
+- `SimWorld.add_body()` returns null for invalid mass properties; `SimWorld.add_constraint()` returns null for a null constraint, a constraint with a null body or a body that is not a registered member of this world, or invalid constraint data.
   `interpolation_alpha()` returns 0 for an invalid timestep. `step()` returns bool; `SimRigidBody.set_mass_properties()` returns bool.
 - `BallJointConstraint` inherits the always-valid default.
 
@@ -80,6 +80,7 @@ energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve i
 - D7: the only generic extension needed for the hinge was `SimConstraint.validate()`; the hinge extends `SimConstraint` directly and does not extend `BallJointConstraint` (kept isolated; the 3 anchor rows are duplicated on purpose).
 - D8: hinge frame is defined by an explicit per-body reference direction (never singular, any orientation); `from_world()` (static factory in `hinge_joint_constraint.gd`) makes the creation pose angle 0.
 - D9: hinge both limits enabled by one flag, finite bounds only; the motor target is clamped into the rate interval the limit rows admit so motor and limits never oppose.
+- D10: world-membership invariant — every registered constraint's `body_a` and `body_b` are members of the same `SimWorld.bodies` (object identity, never body ids). Enforced generically for every `SimConstraint` subclass at `add_constraint()` and again in `preflight()` (the collections are public, so it is re-checked every step). `remove_body()` also removes every constraint that references the body (chosen over refusing the removal: `remove_body()`/`remove_constraint()` return nothing, and a constraint cannot outlive its body); unrelated bodies and constraints keep their order.
 
 ### Rejected / deferred options (with reasons)
 - 3×3 block solve: rejected for now (specification asks for scalar rows); remains an option for the known convergence limits (`PROJECT_STATE.md`).
