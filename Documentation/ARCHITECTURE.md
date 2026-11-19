@@ -21,10 +21,11 @@ only through constraints. Godot nodes only visualize published state. The core i
 | `Simulation/Core/sim_integrator.gd` | Semi-implicit Euler, gyroscopic term, quaternion exponential update |
 | `Simulation/Core/sim_world.gd` | Body and constraint registry, accumulator-driven fixed stepping, step pipeline, diagnostics, `preflight()` |
 | `Simulation/Solver/constraint_row.gd` | Scalar row: Jacobian, bias, softness, effective mass, accumulated impulse, [min,max] limits, warm start, PGS update |
-| `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `validate()`/`is_valid()` (default valid) |
+| `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `solve_iteration()` hook (default: every row in order); `validate()`/`is_valid()` (default valid) |
 | `Simulation/Solver/ball_joint_constraint.gd` | Ball joint: 3 rows, Baumgarte bias, anchor queries |
 | `Simulation/Solver/hinge_joint_constraint.gd` | Hinge: 8 rows (3 anchor, 2 axis alignment, motor, lower limit, upper limit), continuous angle, torque→impulse cap; extends `SimConstraint`, uses `ConstraintRow` unchanged, solved by the unchanged `ConstraintSolver` |
-| `Simulation/Solver/constraint_solver.gd` | prepare → iterate rows → finish; generic (no body-type logic) |
+| `Simulation/Solver/contact_constraint.gd` | Generic one-point contact: unilateral normal row (speculative/Baumgarte bias) + isotropic Coulomb friction (two tangent rows solved as one 2×2 block and projected onto a disk); extends `SimConstraint`, reuses `ConstraintRow`, validates its own data |
+| `Simulation/Solver/constraint_solver.gd` | prepare → iterate `solve_iteration()` of each active constraint → finish; generic (no body-type or contact logic) |
 | `Simulation/Debug/debug_draw_3d.gd`, `simulation_debug.gd` | Line batcher (ImmediateMesh); world axes, COM markers, local axes, joint anchors, text report |
 | `Simulation/Presentation/body_visual_proxy.gd`, `simulation_renderer.gd` | Interpolated primitive-mesh proxies, read-only |
 | `Scenes/main.tscn`, `Scenes/simulation_test.tscn` (+ `.gd`) | Entry scene; inspection scenario (double pendulum, free spinner), camera, HUD, key controls |
@@ -59,16 +60,17 @@ energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve i
   distinct message (not per call). Fixing the cause resumes simulation.
 - `SimWorld.add_body()` returns null for invalid mass properties; `SimWorld.add_constraint()` returns null for a null constraint, a constraint with a null body or a body that is not a registered member of this world, or invalid constraint data.
   `interpolation_alpha()` returns 0 for an invalid timestep. `step()` returns bool; `SimRigidBody.set_mass_properties()` returns bool.
-- `BallJointConstraint` inherits the always-valid default.
+- `BallJointConstraint` inherits the always-valid default. `HingeJointConstraint` and `ContactConstraint` validate their own data in `validate()` (nothing is duplicated in `SimWorld`), so invalid contact data is refused both by `add_constraint()` and by `preflight()` after later mutation.
 
 ## Solver design
 - Rows are scalar and solved sequentially (Gauss-Seidel); a ball joint is three rows along world axes, so its 3×3 block is not solved simultaneously.
-  `solver_iterations` is configurable.
+  `solver_iterations` is configurable. Each iteration calls `SimConstraint.solve_iteration()` on every active constraint: the default solves its rows in order; a constraint whose rows are coupled overrides it.
 - Warm starting: each constraint keeps its rows between steps and re-applies the previous accumulated impulse (scaled by `warm_start_factor`, clamped to the row limits).
   Ball-joint rows use fixed world axes so impulses stay meaningful.
 - Row impulses obey `λ` along `Jᵀ`; ball-joint rows have `Jv_a = −Jv_b`, so linear momentum is conserved exactly and angular momentum up to `λ·(C × e)`, i.e. the (small) constraint error.
 - Inactive hinge features (limits/motor off) keep impulse bounds [0,0]: `ConstraintRow.warm_start` clamps any carried impulse to 0 and `solve` applies nothing — no solver or row change was needed.
 - Row layout, Jacobians, biases, angle tracking, limit and motor rules: header of `hinge_joint_constraint.gd` and `PHYSICS_CONVENTIONS.md` ("Hinge joint").
+- Contact: 3 rows (normal, two tangent). The normal row is an ordinary scalar `ConstraintRow` with bounds `[0, +INF)`. The tangent rows only hold Jacobians and accumulated impulses; their solve is coupled (a disk whose radius is `mu` times the normal row's current impulse), so `ContactConstraint` overrides `solve_iteration()` (normal row first, then the friction block) and `prepare()` (friction warm start projected into the current disk). Equations: `PHYSICS_CONVENTIONS.md` ("Contact"). The caller owns contact geometry (creation, anchor refresh as the patch moves, removal); the solver and `SimWorld` contain no contact logic.
 
 ## Decisions and rationale
 - D1: custom engine only; no Godot physics objects as authority (task requirement).
@@ -82,9 +84,13 @@ energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve i
 - D9: hinge both limits enabled by one flag, finite bounds only; the motor target is clamped into the rate interval the limit rows admit so motor and limits never oppose.
 - D10: world-membership invariant — every registered constraint's `body_a` and `body_b` are members of the same `SimWorld.bodies` (object identity, never body ids). Enforced generically for every `SimConstraint` subclass at `add_constraint()` and again in `preflight()` (the collections are public, so it is re-checked every step). `remove_body()` also removes every constraint that references the body (chosen over refusing the removal: `remove_body()`/`remove_constraint()` return nothing, and a constraint cannot outlive its body); unrelated bodies and constraints keep their order.
 
+- D11: generic solver extension for coupled rows is one hook, `SimConstraint.solve_iteration()` (default loops the rows exactly as before; `ConstraintSolver` calls it instead of looping rows itself). `ConstraintRow`, `SimWorld` and the joints are unchanged. Chosen over a contact-specific branch in the solver and over a new row type: the friction disk couples two rows with a third, which a per-row `[min, max]` clamp cannot express.
+- D12: contact friction is a circular Coulomb limit solved as a 2×2 block with K-metric projection (basis independent, maximum dissipation at convergence), not two clamped scalar rows. Friction is solved after the normal row in every iteration so the limit uses the current normal impulse. The shared world contact point (midpoint of the two anchors) is used for all lever arms so the impulse pair is collinear.
+
 ### Rejected / deferred options (with reasons)
 - 3×3 block solve: rejected for now (specification asks for scalar rows); remains an option for the known convergence limits (`PROJECT_STATE.md`).
 - Split impulses: deferred (planned milestone, `PHASE_PLAN.md`).
+- Contact friction as two independently clamped scalar rows (square/pyramid region): rejected, anisotropic (allows `√2·mu·lambda_n` on diagonals) and dependent on the basis; and as radial Euclidean scaling of the block update: rejected, loses maximum dissipation for anisotropic `K`. Contact normal frame in world space only: rejected, a normal stored in body A's frame follows A's orientation (anchors still need caller refresh).
 - Hinge: wrapped `atan2` as angle state (jumps at ±π; the continuous accumulated angle is used); an arbitrary perpendicular basis for the axis rows (singular cases); re-ordering rows (anchor rows last: measured identical result); extending `BallJointConstraint`; damping or more iterations as a fix for limit behaviour.
 
 ## Visualization contract
