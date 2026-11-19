@@ -16,7 +16,7 @@ constraints a vehicle/rider simulation needs, with no motorcycle- or rider-speci
 3. Remaining project-wide limitations are recorded in `PROJECT_STATE.md`.
 Per-milestone acceptance criteria are defined by the assignment that authorizes the milestone.
 
-**Current milestone: none authorized.** M1.1.1 is complete (awaiting user review and publication); M1.2 and M1.3 start only on an explicit user assignment.
+**Current milestone: none authorized.** M1.1.1 implementation is complete and awaiting user review and acceptance; M1.2 and M1.3 are not authorized and start only on an explicit user assignment.
 
 ### Milestones
 | Milestone | Status |

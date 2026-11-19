@@ -32,4 +32,4 @@ of that exact `SimWorld`. Narrow hardening follow-up to M1.1. M1.2, M1.3 and lat
 - Project-wide limitations: `PROJECT_STATE.md`.
 
 ## 6. Next action
-Stop and wait. The user applies the patch to a clean checkout of `0fe49f1`, verifies it and publishes the branch for review. M1.2 and M1.3 need an explicit new assignment.
+The M1.1.1 branch/PR has been published by the user and is awaiting review and user acceptance. Stop and wait. M1.2 and M1.3 require a separate explicit assignment.
