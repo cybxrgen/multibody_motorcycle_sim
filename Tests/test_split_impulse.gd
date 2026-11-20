@@ -93,6 +93,29 @@ func kinetic_energy_of(world) -> float:
 	return world.total_kinetic_energy()
 
 
+## Hinge about world +Z at `anchor`: static A and a dynamic body B whose COM sits on the anchor and whose local Z axis (a PRINCIPAL axis
+## of `inertia`) is the hinge axis. B is then tilted by `tilt` about world X (axis-alignment error, sine-type C = -sin(tilt)) and its
+## COM is displaced by `anchor_error` (anchor error), after which its physical angular velocity is `spin` about its own hinge axis.
+## That spin satisfies the physical axis rows (it is parallel to B's hinge axis) and, being along a principal axis, has no gyroscopic
+## torque, so the physical solve adds nothing and the split pass is the only thing that moves the pose. `beta` is set on the config.
+func tilted_hinge_spinner(beta: float, inertia: Basis, tilt: float, anchor_error: Vector3, spin: float) -> Dictionary:
+	var w = make_world(Vector3.ZERO)
+	w.config.baumgarte_factor = beta
+	w.config.solver_iterations = ITERATIONS
+	var anchor: Vector3 = Vector3(0.3, 1.0, -0.2)
+	var a = make_static(anchor)
+	var b = make_body(2.0, inertia, anchor)
+	w.add_body(a)
+	w.add_body(b)
+	var joint = HingeJoint.from_world(a, b, anchor, Vector3.BACK, Vector3.RIGHT)  # built satisfied, perturbed below
+	check(joint != null, "hinge construction")
+	w.add_constraint(joint)
+	b.orientation = Quaternion(Vector3.RIGHT, tilt) * b.orientation
+	b.position = anchor + anchor_error
+	b.angular_velocity = spin * (b.orientation * Vector3.BACK)
+	return {"world": w, "a": a, "b": b, "joint": joint}
+
+
 # =====================================================================================================================
 # A. Separation of physical and split velocities
 # =====================================================================================================================
@@ -735,3 +758,112 @@ func test_d9_beta_is_the_only_stabilization_parameter() -> void:
 		if p.name.contains("split") or p.name.contains("stabil"):
 			props.append(p.name)
 	check(props.is_empty(), "no extra stabilization parameter in SimConfig (%s)" % [props])
+
+
+func test_d10_split_angular_correction_changes_orientation_dependent_quantities_but_not_physical_velocity() -> void:
+	# M1.3.1. The split channel never writes physical velocity, but the split ANGULAR velocity rotates the body, and for an
+	# anisotropic body a different orientation means a different world inertia I_w = R I R^T. With the physical omega unchanged,
+	# L_spin = I_w omega and T_rot = 1/2 omega . I_w omega therefore change. This is the expected consequence of pose correction,
+	# not a leak of split velocity into physical velocity (PHYSICS_CONVENTIONS.md, "Stabilization: split impulses").
+	#
+	# Scene: tilted_hinge_spinner(). Box 0.2 x 0.3 x 0.8 (principal moments 0.1217, 0.1133, 0.0217), spinning at 3 rad/s about its
+	# own hinge axis (principal axis Z, the smallest moment), tilted 0.4 rad about X, COM 1 cm off the anchor. A twin world with
+	# beta = 0 (no split channel) is the control: same physical channel, no pose correction.
+	var beta: float = 0.2
+	var tilt: float = 0.4
+	var spin: float = 3.0
+	var anchor_error: Vector3 = Vector3(0.01, -0.005, 0.008)
+	var inertia: Basis = SimMassProperties.box_inertia(2.0, Vector3(0.2, 0.3, 0.8))
+	var s = tilted_hinge_spinner(beta, inertia, tilt, anchor_error, spin)
+	var ctl = tilted_hinge_spinner(0.0, inertia, tilt, anchor_error, spin)
+	var body = s.b
+	var twin = ctl.b
+	var w_before: Vector3 = body.angular_velocity
+	var v_before: Vector3 = body.linear_velocity
+	var q_before: Quaternion = body.orientation
+	var i_before: Basis = body.inertia_world
+	var l_before: Vector3 = body.angular_momentum_about_com()
+	var t_before: float = body.kinetic_energy()
+	check(inertia.x.x != inertia.y.y and inertia.y.y != inertia.z.z and inertia.x.x != inertia.z.z, "the body is anisotropic (three distinct principal moments)")
+
+	# 1. The split pass really produces an angular correction velocity, and it stays out of the physical channel. Solve only (no
+	# integration) on a scratch copy so the mid-step state can be read.
+	var probe = tilted_hinge_spinner(beta, inertia, tilt, anchor_error, spin)
+	solve_only(probe.world)
+	check(probe.b.split_angular_velocity.length() > 5.0, "the split pass produced an angular correction velocity (%s rad/s)" % probe.b.split_angular_velocity.length())
+	check(probe.b.split_linear_velocity.length() > 0.1, "and a linear one from the anchor error (%s m/s)" % probe.b.split_linear_velocity.length())
+	check_vec3_near(probe.b.angular_velocity, w_before, TOL, "solve: physical angular velocity untouched by the split pass")
+	check_vec3_near(probe.b.linear_velocity, v_before, TOL, "solve: physical linear velocity untouched by the split pass")
+
+	# 2. The real pipeline: one World.step() (physical pass, split pass, position integration). No pose is edited by hand.
+	s.world.step()
+	ctl.world.step()
+
+	# Physical velocities: unchanged from before the step and identical to the control that has no split channel. Tolerances: the
+	# physical rows see (b x p).omega with omega parallel to b, i.e. float32 rounding of O(1e-7); TOL = 1e-5 covers it and is far
+	# below the 10 rad/s (1 m/s scale) a leak of the split velocity would produce.
+	check_vec3_near(body.angular_velocity, w_before, TOL, "physical angular velocity unchanged by the split correction")
+	check_vec3_near(body.linear_velocity, v_before, TOL, "physical linear velocity unchanged by the split correction")
+	check_vec3_near(body.angular_velocity, twin.angular_velocity, TOL, "physical angular velocity equals the beta = 0 control")
+	check_vec3_near(body.linear_velocity, twin.linear_velocity, TOL, "physical linear velocity equals the beta = 0 control")
+	check(body.split_angular_velocity == Vector3.ZERO and body.split_linear_velocity == Vector3.ZERO, "split velocities are scratch: zero after the step")
+	# The linear correction did happen (so the linear check above is not vacuous): the pose moved by beta * anchor error.
+	check_vec3_near(body.position - twin.position, -beta * anchor_error, 1.0e-6, "linear pose correction removed beta * anchor error without velocity")
+
+	# Orientation: changed by the split angular correction. Relative rotation to the control isolates it from the physical spin about
+	# the hinge axis. One row-exact step rotates by beta * tan(tilt) (the axis row's Jacobian has magnitude cos(tilt)); second-order
+	# terms of the composed rotation vector are below 1e-4.
+	var relative: Quaternion = body.orientation * twin.orientation.inverse()
+	check_near(relative.get_angle(), beta * tan(tilt), 1.0e-4, "split correction rotated the body by beta * tan(tilt)")
+	check(relative.get_angle() > 0.05, "the orientation change is substantial (%s rad)" % relative.get_angle())
+	# The physical spin turns the body about its own hinge axis, so only the split rotation can move that axis in the world frame.
+	var axis_before: Vector3 = q_before * Vector3.BACK
+	check_near((body.orientation * Vector3.BACK).angle_to(axis_before), beta * tan(tilt), 1.0e-4, "the body's hinge axis was turned by the split correction")
+	check_near((twin.orientation * Vector3.BACK).angle_to(axis_before), 0.0, 1.0e-4, "control: the hinge axis stays where it was (only the physical spin about it)")
+
+	# World-space inertia reflects the corrected orientation: recomputed here from the quaternion, not read from the body's cache.
+	var r_now: Basis = Basis(body.orientation)
+	var i_now: Basis = r_now * inertia * r_now.transposed()
+	check_basis_near(body.inertia_world, i_now, 1.0e-6, "inertia_world = R I R^T of the corrected orientation")
+	check((body.inertia_world.x - i_before.x).length() + (body.inertia_world.y - i_before.y).length() + (body.inertia_world.z - i_before.z).length() > 0.01,
+		"the world inertia tensor changed (it is orientation dependent for an anisotropic body)")
+
+	# Spin angular momentum and rotational kinetic energy: computed from the UPDATED inertia and the UNCHANGED physical omega.
+	var w_now: Vector3 = body.angular_velocity
+	var l_now: Vector3 = body.angular_momentum_about_com()
+	var t_now: float = body.kinetic_energy()
+	check_vec3_near(l_now, i_now * w_now, 1.0e-6, "L_spin = I_w(new orientation) * omega")
+	check_near(t_now, 0.5 * w_now.dot(i_now * w_now), 1.0e-6, "T_rot = 1/2 omega . I_w(new orientation) omega")
+	# Independent principal-axis form of the same energy: T = 1/2 sum I_k (omega . e_k)^2 with e_k the body axes in the world frame.
+	var t_principal: float = 0.0
+	var principal: Array = [inertia.x.x, inertia.y.y, inertia.z.z]
+	var axes: Array = [body.orientation * Vector3.RIGHT, body.orientation * Vector3.UP, body.orientation * Vector3.BACK]
+	for k in 3:
+		t_principal += 0.5 * principal[k] * pow(w_now.dot(axes[k]), 2.0)
+	check_near(t_now, t_principal, 1.0e-6, "T_rot agrees with the principal-axis form")
+
+	# The effect: both quantities changed although omega did not. The control, which has the same omega but no pose correction,
+	# keeps its initial values (omega is along a principal axis, so the physical spin about it leaves I_w omega unchanged).
+	check_vec3_near(twin.angular_momentum_about_com(), l_before, 1.0e-5, "control (no pose correction): L_spin unchanged")
+	check_near(twin.kinetic_energy(), t_before, 1.0e-5, "control (no pose correction): T_rot unchanged")
+	var dl: float = (l_now - l_before).length()
+	var dt_rel: float = (t_now - t_before) / t_before
+	# Measured for this configuration: |dL| = 0.0232 (|L| = 0.065), dT/T = +3.0 %. Thresholds are a factor ~2-3 below, far above float32 noise.
+	check(dl > 0.01, "L_spin changed because the orientation changed (|dL| = %s, |L| = %s)" % [dl, l_before.length()])
+	check(dt_rel > 0.01, "T_rot changed because the orientation changed (dT/T = %s)" % dt_rel)
+	# Direction of the effect in THIS configuration (not a general rule): omega started on the smallest-moment axis and the correction
+	# turned the body so that omega now has a component along larger-moment axes, hence T_rot = 1/2 omega . I_w omega rose.
+	check(t_now > t_before, "T_rot rose at fixed omega (smallest-moment spin turned away from its spin axis)")
+
+	# Counter-check, same scene with an isotropic body: I_w is orientation independent, so the same pose correction changes
+	# neither L_spin nor T_rot. The change above is therefore a consequence of anisotropy, not of the correction injecting energy.
+	var ball_inertia: Basis = SimMassProperties.sphere_inertia(2.0, 0.4)
+	var iso = tilted_hinge_spinner(beta, ball_inertia, tilt, anchor_error, spin)
+	var l_iso: Vector3 = iso.b.angular_momentum_about_com()
+	var t_iso: float = iso.b.kinetic_energy()
+	var iso_axis_before: Vector3 = iso.b.orientation * Vector3.BACK
+	iso.world.step()
+	check((iso.b.orientation * Vector3.BACK).angle_to(iso_axis_before) > 0.05, "isotropic body: the pose was corrected by the same split rotation")
+	check_vec3_near(iso.b.angular_velocity, l_iso / ball_inertia.x.x, TOL, "isotropic body: physical angular velocity unchanged")
+	check_vec3_near(iso.b.angular_momentum_about_com(), l_iso, 1.0e-5, "isotropic body: L_spin unchanged by the pose correction")
+	check_near(iso.b.kinetic_energy(), t_iso, 1.0e-5, "isotropic body: T_rot unchanged by the pose correction")

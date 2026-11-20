@@ -25,7 +25,7 @@ Per-milestone acceptance criteria are defined by the assignment that authorizes 
 | M1.1.1 Constraint/world body-membership validation | Complete (accepted and merged by the user) |
 | M1.2 Contact (unilateral) constraints with friction | Complete (accepted and merged by the user) |
 | M1.2.1 Handoff documentation correction | Complete (accepted and merged by the user) |
-| M1.3 Split-impulse stabilization | Implemented and committed on its own branch; awaiting user review and acceptance (verification in `PROJECT_STATE.md`) |
+| M1.3 Split-impulse stabilization | Implemented and committed on its own branch; review finding addressed by M1.3.1 (angular-pose-correction accounting: documentation and regression test, no solver change); awaiting user review and acceptance (verification in `PROJECT_STATE.md`) |
 
 ## Next phase: M2 — Motorcycle
 **Objective:** build the motorcycle as independent rigid bodies coupled only through M1 joints and contacts: chassis, steering/fork, swingarm, wheels,
