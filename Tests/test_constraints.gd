@@ -155,7 +155,13 @@ func test_two_dynamic_bodies_stay_joined() -> void:
 		w.step()
 		max_err = maxf(max_err, joint.linear_error().length())
 	check(max_err < 2e-3, "dynamic-dynamic joint drift small (max=%s)" % max_err)
-	check_near(joint.relative_anchor_velocity().length(), 0.0, 1e-2, "anchors co-move at end of step")
+	# Velocity-level satisfaction is a property of the SOLVED state. After the position integration the bodies have rotated, so a
+	# measurement then carries the frozen-Jacobian lag ~ w^2 r dt (0.017 m/s peak here, 0.0166 at the last step), which depends on the
+	# phase of the swing and not on the solver. Evaluate it right after a solve, without integrating.
+	joint.prepare(w.config.fixed_timestep, w.config)
+	for i in w.config.solver_iterations:
+		joint.solve_iteration()
+	check_near(joint.relative_anchor_velocity().length(), 0.0, 1e-2, "anchors co-move after the velocity solve")
 	check(a.angular_velocity.length() + b.angular_velocity.length() > 0.1, "off-center coupling induced rotation")
 
 

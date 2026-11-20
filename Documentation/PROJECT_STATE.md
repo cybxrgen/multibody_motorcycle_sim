@@ -12,11 +12,11 @@ Evidence labels used here: **VERIFIED** (confirmed by inspection/execution), **R
 
 ## Purpose and maturity
 A custom rigid-body and constraint physics foundation (Godot 4.7, GDScript) intended to become a motorcycle + rider multibody simulator.
-Current maturity: a generic physics foundation with ball and hinge joints, a generic one-point contact constraint with Coulomb friction, and a minimal inspection scene.
+Current maturity: a generic physics foundation with ball and hinge joints, a generic one-point contact constraint with Coulomb friction, split-impulse positional stabilization, and a minimal inspection scene.
 There is **no** collision detection, contact manifold, motorcycle, tire, drivetrain, rider or controller code. See `PHASE_PLAN.md` for what is planned.
 
 ## Repository state
-- VERIFIED: simulator source and tests were last changed by the M1.2 commit ("M1.2: implement generic contact constraints with friction"), on top of `main` at `b877c00`, which contains the merged M1.1.1 (pull requests #3 and #4, checked in the Git history). The hash of the M1.2 commit is in the delivery manifest and `HANDOFF.md`; M1.2 is not yet on `main`.
+- VERIFIED: simulator source and tests were last changed by the M1.3 commit ("M1.3: implement generic split-impulse stabilization"), on top of `main` at `9af295c`, which contains the merged M1.2 (pull request #5) and M1.2.1 (pull request #6), checked in the Git history. The hash of the M1.3 commit is in the delivery manifest and `HANDOFF.md`; M1.3 is not yet on `main`.
 - `git log --oneline --decorate` is the source of truth for the current commit; this file does not track documentation-only commits.
 
 ## Capabilities
@@ -30,39 +30,43 @@ There is **no** collision detection, contact manifold, motorcycle, tire, drivetr
 | Fixed-timestep accumulator (frame clamp, step cap, tolerance `step_tolerance`, interpolation alpha, published/previous state) | Implemented | `SimWorld` |
 | Diagnostics: total linear/angular momentum, kinetic and potential energy | Implemented | `SimWorld` |
 | Input validation: inertia, `SimConfig.validate()`, `SimConstraint.validate()`, constraint/world body membership (`add_constraint()`, `preflight()`, `remove_body()` also removes the body's constraints), `SimWorld.preflight()` (invalid ⇒ no step, no state change) | Implemented | `SimMassProperties`, `SimConfig`, `SimConstraint`, `SimWorld` |
-| Constraint framework: `ConstraintRow`, `SimConstraint` (with the `solve_iteration()` hook for coupled rows), `ConstraintSolver` (projected Gauss-Seidel), warm starting, Baumgarte stabilization | Implemented | `Simulation/Solver/` |
+| Constraint framework: `ConstraintRow`, `SimConstraint` (with the `solve_iteration()` hook for coupled rows), `ConstraintSolver` (projected Gauss-Seidel), warm starting, split-impulse stabilization (`solve_split_iteration()` hook, split channel on `ConstraintRow`) | Implemented | `Simulation/Solver/` |
 | Ball joint (3 anchor rows); static-body participation | Implemented | `BallJointConstraint` |
 | Hinge joint: 5 constrained DOF, free axis rotation, continuous multi-turn angle, optional lower/upper limits, velocity motor with torque cap | Implemented | `HingeJointConstraint` (8 rows) |
 | Minimal visualization: camera, light, primitive proxies with interpolation, axes, COM markers, anchors, HUD, pause/step/reset | Implemented, **visually UNVERIFIED** | `Simulation/Presentation`, `Simulation/Debug`, `Scenes/simulation_test.*` |
 | Headless test suite and runner | Implemented | `Tests/` (see `TESTING.md`) |
 | Verified delivery tooling | Implemented | `Tools/make_delivery.sh` |
-| Generic one-point contact: unilateral normal row (speculative + Baumgarte bias), isotropic Coulomb friction as a coupled 2×2 block with K-metric disk projection, friction warm start projected into the current disk, static-body participation, self-validation | Implemented (M1.2, awaiting user review) | `ContactConstraint` (3 rows), `PHYSICS_CONVENTIONS.md` ("Contact") |
-| Collision detection, contact manifolds/persistence, restitution, split-impulse stabilization | Not implemented (split impulses planned, `PHASE_PLAN.md`) | — |
+| Generic one-point contact: unilateral normal row (speculative physical bias; penetration removed by the split channel), isotropic Coulomb friction as a coupled 2×2 block with K-metric disk projection, friction warm start projected into the current disk, static-body participation, self-validation | Implemented (M1.2, accepted and merged) | `ContactConstraint` (3 rows), `PHYSICS_CONVENTIONS.md` ("Contact") |
+| Split-impulse stabilization: separate split velocities and split solve for ball/hinge anchor error, hinge axis alignment, violated hinge limits and contact penetration; physical velocities untouched; pose integrated with physical + split velocity; not warm started; reuses `SimConfig.baumgarte_factor` | Implemented (M1.3, awaiting user review) | `ConstraintRow`, `SimConstraint`, `ConstraintSolver`, `SimIntegrator`, `SimWorld`, `PHYSICS_CONVENTIONS.md` ("Stabilization: split impulses") |
+| Collision detection, contact manifolds/persistence, restitution | Not implemented | — |
 | Motorcycle, suspension, tires, drivetrain, rider, controllers | Planned (not started) | `PHASE_PLAN.md` |
 
 Capabilities above were checked against the source tree (module files and symbols exist). Behavioural correctness rests on the test results below.
 
 ## Latest verification results
 Environment of the runs: Godot 4.7.stable.official.5b4e0cb0f, linux x86_64, headless, no display (official `Godot_v4.7-stable_linux.x86_64`).
-- VERIFIED (M1.2 agent), automated tests: `godot --headless --path . --script res://Tests/run_tests.gd` → **163 passed, 0 failed, 0 skipped (4528 checks)**, exit 0, no `SCRIPT ERROR`. Baseline on the unmodified base before any change: 130 passed, 0 failed (3967 checks). The new `Tests/test_contact.gd` has 33 tests; the 130 existing tests pass unchanged with the solver hook in place.
-- VERIFIED, regression sensitivity: ten defects injected into `ContactConstraint` one at a time (pulling normal row, no speculative bias, square friction clamp, Euclidean projection, friction solved before the normal row, no warm-start clip, no Baumgarte factor, friction limit not tied to the normal impulse, lever arms at the anchors, a wrongly rotated tangent basis). Eight were caught by the first version of the tests; two (Euclidean projection, friction before normal) survived, two tests were added for them, and both are now caught. The set was not re-run in full after those two additions (they only add checks); only those two and the Baumgarte defect were re-run.
+- VERIFIED (M1.3 agent), automated tests: `godot --headless --path . --script res://Tests/run_tests.gd` → **191 passed, 0 failed, 0 skipped (4940 checks)**, exit 0, no `SCRIPT ERROR`. Baseline on the unmodified base before any change: 163 passed, 0 failed (4528 checks). The new `Tests/test_split_impulse.gd` has 28 tests. Ten existing tests encoded the old velocity-level Baumgarte behaviour (or its masking effects) and were updated with recorded reasons; no tolerance was relaxed without a documented cause (details in `HANDOFF.md`).
+- VERIFIED, regression sensitivity: twelve defects injected into the split implementation one at a time (old Baumgarte bias on the contact, hinge limit and ball joint rows, split impulse applied to physical velocity, split velocity not integrated / not cleared after the step / not zeroed before the solve, split warm start, split pass ignoring `enabled`, split bias on the motor row, speculative contact moved to the split channel, friction limit including the split impulse). Eleven are caught by `test_split_impulse.gd`; one (friction limit including the split impulse) is an equivalent mutant while the physical pass runs completely before the split pass. A first run of the set missed the spurious motor split bias; a pose check was added and that defect is now caught. The set was not re-run in full after the final test edits (only the motor defect was re-run).
 - VERIFIED, import/parse: fresh import (`.godot/` deleted) `godot --headless --path . --import` exit 0, no error/warning lines.
 - VERIFIED, headless scene smoke: `Scenes/simulation_test.tscn` and `Scenes/main.tscn` each ran 240 frames headless, exit 0, no error/warning lines (smoke only; neither scene uses contacts).
-- Test-function counts per file are in the suite itself (`grep -c "^func test_" Tests/test_*.gd`); hinge joint 44 and contact 33 of the 163.
-- UNVERIFIED / not done: visual inspection on a graphical display. Camera, colors, debug geometry, HUD and interaction have never been looked at.
+- Test-function counts per file are in the suite itself (`grep -c "^func test_" Tests/test_*.gd`); hinge joint 44, contact 33, split impulse 28 of the 191.
+- UNVERIFIED / not done: visual inspection on a graphical display. Camera, colors, debug geometry, HUD and interaction have never been looked at. The effect of split correction on the visualization (poses are now corrected without velocity) was only smoke-run.
   No automated test covers `Scenes/`, `Simulation/Presentation` or `Simulation/Debug`; contacts have no debug visualization.
 - The suite intentionally prints many `ERROR:` lines from invalid-input tests; failures are only the `[FAIL]` lines and the exit code (see `TESTING.md`).
+
 
 ## Known limitations and technical debt (project-wide)
 Measured values come from earlier agents' experiments and are REPORTED unless re-run.
 
 ### Solver and joints
 - **Frozen Jacobian per step (fast rotation).** Row Jacobians are linearized once per step. Joint error grows with spin: ~`r·sin(φ)·(|ω|dt)²/2`
-  (17 mm at 50 rad/s, 0.42 rad/step), independent of iteration count. A hinge free-spinning loses rate ~(ω dt)²: 0.5 % over 5 s at 3 rad/s, ~4 % at 6 rad/s
-  (independent of iterations; halving dt cut the kinetic-energy loss from 7.3 % to 1.2 %). Mechanism: Suspected; behaviour: Confirmed.
-- **Baumgarte drift and energy.** Steady-state anchor error `v²dt²/(2Lβ)` (3.3 mm for a 1 m, 4.4 m/s pendulum). Baumgarte injects a small amount
-  of energy proportional to the constraint error.
-- **Slow scalar Gauss-Seidel convergence.** Large mass/inertia ratios converge slowly (0.1 m sphere on a 1 m rod: cold-start anchor error 35 mm at 20 iterations,
+  (17 mm at 50 rad/s, 0.42 rad/step), independent of iteration count. A hinge free-spinning loses rate by the law `ω(t)⁻² = ω₀⁻² + f dt t` (`f = m d⊥²/I_pivot`, `PHYSICS_CONVENTIONS.md`),
+  O(dt): 3.1 % of the kinetic energy in 1 s at 2 rad/s and dt = 1/120 (1.6 % at 1/240, 0.8 % at 1/480); 3 rad/s decays to 2.42 rad/s in 8 s. The loss is **unmasked since M1.3**: the former velocity-level Baumgarte term
+  injected energy that offset most of it (0.15 % over the same 1 s). Mechanism: Confirmed by the derivation above and by runs with beta = 0 (kinetic-energy ratio 0.96865 with split impulses, 0.96861 with beta = 0).
+- **Positional drift and its correction.** Steady-state anchor error `v²dt²/(2Lβ)`. Since M1.3 the correction is a split impulse: no energy or velocity is injected, but the pose is moved without momentum,
+  so total angular momentum about the origin changes by `Σ m Δx_split × v` per step (checked in the tests); `total_angular_momentum()` reports physical state and shows it.
+- **Split impulses are cold started.** They are rebuilt from zero every step (required, so the correction cannot persist), so high mass-ratio configurations converge more slowly than the warm-started physical rows: a 0.1 m sphere on a 1.2 m pendulum arm peaks at 16 mm anchor error at 20 iterations and 4.0 mm at 100 (4.3 mm and 3.3 mm with the former warm-started Baumgarte bias). More iterations are the only remedy tried.
+- **Slow scalar Gauss-Seidel convergence.** Large mass/inertia ratios converge slowly (0.1 m sphere on a 1 m rod: cold-start anchor error 35 mm at 20 iterations, The split pass shows the same behaviour without the warm-start benefit (previous bullet).
   11 mm at 50, 4.7 mm at 100, 3.3 mm at 200; warm starting reaches 3.3 mm at 50). The 3×3 anchor block is not solved simultaneously.
 - **Hinge limit-stop convergence.** After a 3 rad/s impact on a limit (static body A) the residual separation speed is 10 % of impact speed at the default 20 iterations,
   1.5 % at 40, 0 at ≥ 80; the angle never penetrates the limit. Only the iteration count changes this (row order and β do not).
@@ -71,11 +75,10 @@ Measured values come from earlier agents' experiments and are REPORTED unless re
 - **Explicit gyroscopic term.** O(dt) energy / angular-momentum error for fast asymmetric spin.
 - Joint-row accumulated impulses are only meaningful for the last step (warm-start state).
 - Interpretation note: after an inelastic stop a hinge can drift off the limit because the free pair of bodies legitimately tumbles (anchor forces exert axial torques). This is physics, not drift.
-- Mitigations deferred (not decided): block (3×3) solve, sub-stepping, re-linearization, split impulses (planned as a milestone), implicit gyroscopic solve.
+- Mitigations deferred (not decided): block (3×3) solve, sub-stepping, re-linearization, implicit gyroscopic solve.
 
 ### Contacts
 - **Caller-owned geometry.** Anchors are fixed to the bodies; the caller must re-seat them as the contact patch moves (sliding, rolling) and must create/remove contacts itself. There is no collision detection, manifold or persistence; a multi-point contact is several independent constraints.
-- **Baumgarte penetration correction adds velocity.** Pushing out at `beta|g|/dt` leaves that velocity in the body after the penetration is gone (no damping, bounded). Split impulses are the planned remedy (M1.3, not authorized).
 - **Inelastic only.** No restitution; static and kinetic friction share one coefficient.
 - **Speculative bias is linear.** Closing is judged with the current linear contact-point velocity; rotation of the bodies inside one step is second order (frozen Jacobian, as above).
 - **Gauss-Seidel on coupled contacts.** Several contacts on one body converge iteratively (a box on four corners carries its weight to within 2 % at 20 iterations with warm starting); statically indeterminate loads are not solved exactly.

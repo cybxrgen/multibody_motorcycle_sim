@@ -20,11 +20,15 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## ---- Rows (always 3) ----
 ##  0  normal     Jv_a = -n, Jw_a = -(r_a x n), Jv_b = +n, Jw_b = r_b x n.  Cdot = vn.  Impulse bounds [0, +INF):
 ##                the contact can push B along +n (and A along -n) but never pull.
-##                Row solve enforces  Cdot + bias >= 0, i.e. vn >= -bias:
+##                Physical row solve enforces  Cdot + bias >= 0, i.e. vn >= -bias:
 ##                  g >= 0: bias = g/dt        speculative: vn >= -g/dt, the bodies may approach at most fast enough to close
 ##                                             the gap exactly this step; if they are slower, no impulse (the row is inactive)
-##                  g <  0: bias = (beta/dt) g Baumgarte (config.baumgarte_factor): vn >= beta*|g|/dt pushes apart
-##                The two branches meet at g = 0 (continuous), as the hinge limit rows do.
+##                  g <  0: bias = 0           the bodies may not approach further (vn >= 0); no positional term, so the
+##                                             physical impulse never adds separating velocity
+##                The physical bias is continuous at g = 0 (g/dt -> 0), as for the hinge limit rows.
+##                Split channel (M1.3, positional correction only), active only while penetrating (g < 0):
+##                  split_bias = (beta/dt) g (negative, beta = config.baumgarte_factor), bounds [0, +INF): the split velocities
+##                  separate the bodies at vn_split >= beta*|g|/dt. This moves the pose and never the physical velocity.
 ##  1,2 tangent   t1, t2 in the plane perpendicular to n; same Jacobian pattern as row 0 with t instead of n,
 ##                bias 0 (friction drives the tangential relative velocity at p to zero). They are NOT solved as scalar
 ##                rows: the pair is solved as one 2x2 block (solve_iteration) and projected onto a disk.
@@ -223,9 +227,16 @@ func _update_rows(dt: float, config) -> void:
 
 	var normal_row = rows[ROW_NORMAL]
 	_set_row(normal_row, _normal, r_a, r_b)
-	normal_row.bias = _gap / dt if _gap >= 0.0 else (config.baumgarte_factor / dt) * _gap
+	normal_row.bias = _gap / dt if _gap >= 0.0 else 0.0
 	normal_row.min_impulse = 0.0
 	normal_row.max_impulse = INF
+	if _gap < 0.0:
+		normal_row.split_enabled = true
+		normal_row.split_bias = (config.baumgarte_factor / dt) * _gap
+		normal_row.split_min_impulse = 0.0
+		normal_row.split_max_impulse = INF
+	else:
+		normal_row.split_enabled = false
 
 	_set_row(rows[ROW_TANGENT_1], _t1, r_a, r_b)
 	_set_row(rows[ROW_TANGENT_2], _t2, r_a, r_b)
@@ -271,9 +282,16 @@ func prepare(dt: float, config) -> void:
 
 
 ## Normal row first, so the friction bound uses the current normal impulse, then the coupled friction block.
+## The friction bound reads the PHYSICAL normal row's accumulated impulse only; the split normal impulse lives in a separate
+## field (split_accumulated_impulse) that friction never sees.
 func solve_iteration() -> void:
 	rows[ROW_NORMAL].solve()
 	_solve_friction()
+
+
+## Split pass: only the normal row has a split channel (friction is physical), and only while penetrating.
+func solve_split_iteration() -> void:
+	rows[ROW_NORMAL].solve_split()
 
 
 func finish() -> void:

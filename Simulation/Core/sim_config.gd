@@ -14,7 +14,8 @@ extends Resource
 @export_group("Constraint solver")
 ## Sequential-impulse / projected Gauss-Seidel iterations per step.
 @export var solver_iterations: int = 20
-## Baumgarte factor beta: fraction of position error removed per step (velocity-level bias = beta/dt * C).
+## Baumgarte factor beta: fraction of position error removed per step. Applied through the split-impulse channel
+## (split bias = beta/dt * C), so it corrects pose without adding physical velocity.
 @export var baumgarte_factor: float = 0.2
 ## Re-apply last step's accumulated impulses before iterating.
 @export var warm_starting: bool = true

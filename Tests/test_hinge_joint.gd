@@ -52,6 +52,22 @@ func rotate_b_about_hinge(s: Dictionary, phi: float) -> void:
 	b.orientation = dq * b.orientation
 
 
+## Free spin of a hinge pair about its axis (static A, no limits/motor) loses rate because the velocity solve uses a frozen Jacobian.
+## One step (delta = w dt) leaves a tangential velocity error ~delta^2/2 after the centripetal impulse, which removes a fraction
+## (delta^2/2) * f of w with f = m d_perp^2 / I_pivot (d_perp: COM distance from the axis, I_pivot = a.I.a + m d_perp^2).
+## Hence dw/dt = -f w^3 dt/2, i.e. w(t)^-2 = w0^-2 + f dt t. Since M1.3 the loss is no longer masked: the former velocity-level
+## Baumgarte term injected energy that happened to offset it (measured: kinetic energy ratio 0.9985 with the old Baumgarte bias,
+## 0.9686 without any stabilization AND with split impulses, 1 s at 2 rad/s, dt = 1/120; halving dt halves the loss).
+func spin_loss_factor(s: Dictionary) -> float:
+	var d: Vector3 = s.b.position - s.anchor
+	var d_perp_sq: float = d.length_squared() - d.dot(s.axis) * d.dot(s.axis)
+	return s.b.mass * d_perp_sq / (s.axis.dot(s.b.inertia_world * s.axis) + s.b.mass * d_perp_sq)
+
+
+func predicted_spin_rate(omega0: float, f: float, t: float) -> float:
+	return pow(1.0 / (omega0 * omega0) + f * DT * t, -0.5)
+
+
 ## Runs `steps` steps and reports the worst anchor error, worst axis error and peak body angular speed.
 func run_and_measure(s: Dictionary, steps: int) -> Dictionary:
 	var result: Dictionary = {"max_lin": 0.0, "max_axis": 0.0, "max_omega": 0.0}
@@ -190,12 +206,17 @@ func test_a8_rotation_about_hinge_axis_is_free() -> void:
 		var expected: float = tau * steps * DT / i_pivot
 		check_near(s.joint.angle_rate(), expected, 0.01 * expected, "axis %s: axial torque accelerates freely (%s vs %s)" % [cfg[0], s.joint.angle_rate(), expected])
 		check(s.joint.axis_error_angle() < 5.0e-3, "axis %s: axes stay aligned (%s)" % [cfg[0], s.joint.axis_error_angle()])
-	# Free spin keeps its rate (low speed: see the spin-decay note in PROJECT_STATE.md for the (w dt)^2 loss).
+	# Free spin keeps its rate up to the documented (w dt)^2 loss (PROJECT_STATE.md, see spin_loss_factor).
 	var s2 = make_hinge(Vector3(1, 2, -3), true)
 	s2.b.angular_velocity = s2.axis * 2.0
 	s2.b.linear_velocity = s2.b.angular_velocity.cross(s2.b.position - s2.anchor)
+	var f2: float = spin_loss_factor(s2)
 	run_steps(s2.world, 120)
-	check_near(s2.joint.angle_rate(), 2.0, 0.01 * 2.0, "free spin of 2 rad/s keeps its rate over 1 s (%s)" % s2.joint.angle_rate())
+	# Expected rate from the frozen-Jacobian loss law above (1.9706 here); measured 1.9709. Tolerance 1e-3 covers the
+	# higher-order terms of the first-order derivation (~1.3e-4 relative observed) and float32 rounding.
+	var expected_rate: float = predicted_spin_rate(2.0, f2, 120 * DT)
+	check_near(s2.joint.angle_rate(), expected_rate, 1.0e-3, "free spin of 2 rad/s follows the frozen-Jacobian loss law (%s vs %s)" % [s2.joint.angle_rate(), expected_rate])
+	check(s2.joint.angle_rate() > 2.0 * 0.98, "and loses less than 2 %% in 1 s (%s)" % s2.joint.angle_rate())
 	# Dynamic A: the hinge exerts no external force or torque on the pair, so total linear and angular (about the origin)
 	# momentum are conserved even though both bodies rotate and translate.
 	for cfg in arbitrary_orientations():
@@ -296,16 +317,19 @@ func test_b4_angle_continuous_across_pi() -> void:
 
 func test_b5_angle_accumulates_beyond_one_revolution() -> void:
 	var s = make_hinge(Vector3(0, 0, 1), true)
-	# 3 rad/s = 0.025 rad per step. The M0 frozen-Jacobian spin loss is ~(w dt)^2: measured 0.5% of the rate over 5 s here
-	# (4% at 6 rad/s, see PROJECT_STATE.md), hence the 2% tolerance below.
+	# 3 rad/s = 0.025 rad per step. The rate decays by the frozen-Jacobian loss law (spin_loss_factor): w^-2 = w0^-2 + f dt t, so the
+	# angle is the integral (2/k) (sqrt(w0^-2 + k T) - sqrt(w0^-2)) with k = f dt (21.43 rad here; 24 rad without any loss).
+	# Measured 21.41: the 0.25 % tolerance covers the higher-order terms of the first-order derivation (0.08 % observed).
 	var omega: float = 3.0
 	s.b.angular_velocity = Vector3(0, 0, omega)
 	s.b.linear_velocity = s.b.angular_velocity.cross(s.b.position - s.anchor)
-	var steps: int = 960  # 8 s => ~24 rad = ~3.8 revolutions
+	var steps: int = 960  # 8 s => ~21 rad = ~3.4 revolutions
+	var k: float = spin_loss_factor(s) * DT
+	var total_time: float = steps * DT
 	run_steps(s.world, steps)
-	var expected: float = omega * steps * DT
+	var expected: float = (2.0 / k) * (sqrt(1.0 / (omega * omega) + k * total_time) - sqrt(1.0 / (omega * omega)))
 	check(s.joint.angle() > 3.0 * TAU, "more than three full revolutions counted (%s)" % s.joint.angle())
-	check_near(s.joint.angle(), expected, 0.02 * expected, "angle ~ omega * t (%s vs %s)" % [s.joint.angle(), expected])
+	check_near(s.joint.angle(), expected, 0.0025 * expected, "angle follows the frozen-Jacobian loss law (%s vs %s)" % [s.joint.angle(), expected])
 	# Reverse spin: counts back down through zero into negative revolutions.
 	s.b.angular_velocity = Vector3(0, 0, -omega)
 	s.b.linear_velocity = s.b.angular_velocity.cross(s.b.position - s.anchor)
@@ -460,6 +484,8 @@ func test_c5_a_limit_never_pulls_outward() -> void:
 	var r: Dictionary = run_tracking(s, 120)
 	check(r.min_lower_impulse >= 0.0 and r.min_upper_impulse >= 0.0, "limit impulses never negative (%s, %s)" % [r.min_lower_impulse, r.min_upper_impulse])
 	# (2) Violated lower limit (pose edit below the minimum), moving further out: the first step must not increase the outward speed.
+	# Since M1.3 the physical limit row only forbids further outward rate (physical bias 0); the violation itself is removed by the
+	# split channel, which moves the pose (angle += beta * violation) and never the rate: the rate must come out as 0, not positive.
 	for outward in [0.0, -2.0]:
 		var v = make_limited(true, -0.5, 0.6)
 		rotate_b_about_hinge(v, -0.7)
@@ -468,7 +494,8 @@ func test_c5_a_limit_never_pulls_outward() -> void:
 		var before: float = v.joint.angle_rate()
 		v.world.step()
 		check(v.joint.angle_rate() >= before - 1.0e-6, "violated lower limit (rate %s): rate %s -> %s, never more negative" % [outward, before, v.joint.angle_rate()])
-		check(v.joint.angle_rate() > 0.0, "violated lower limit pushes back inward (rate %s)" % v.joint.angle_rate())
+		check_near(v.joint.angle_rate(), 0.0, 1.0e-3, "violated lower limit: outward rate removed, none added (rate %s)" % v.joint.angle_rate())
+		check_near(v.joint.angle(), -0.7 + v.world.config.baumgarte_factor * 0.2 + v.joint.angle_rate() * DT, 3.0e-3, "violated lower limit: pose pushed back inward by beta * violation (angle %s)" % v.joint.angle())
 		var worst: float = v.joint.angle()
 		for i in 60:
 			v.world.step()
@@ -483,7 +510,8 @@ func test_c5_a_limit_never_pulls_outward() -> void:
 		var before: float = v.joint.angle_rate()
 		v.world.step()
 		check(v.joint.angle_rate() <= before + 1.0e-6, "violated upper limit (rate %s): rate %s -> %s, never more positive" % [outward, before, v.joint.angle_rate()])
-		check(v.joint.angle_rate() < 0.0, "violated upper limit pushes back inward (rate %s)" % v.joint.angle_rate())
+		check_near(v.joint.angle_rate(), 0.0, 1.0e-3, "violated upper limit: outward rate removed, none added (rate %s)" % v.joint.angle_rate())
+		check_near(v.joint.angle(), 0.8 - v.world.config.baumgarte_factor * 0.2 + v.joint.angle_rate() * DT, 3.0e-3, "violated upper limit: pose pushed back inward (angle %s)" % v.joint.angle())
 
 
 func test_c6_both_limits_dynamic_pair() -> void:
@@ -879,8 +907,12 @@ func test_e4_hinge_impulses_conserve_linear_momentum() -> void:
 	for i in 480:
 		s.world.step()
 		max_dev = maxf(max_dev, (s.world.total_linear_momentum() - p0).length())
-	# Every row has Jv_a = -Jv_b (anchor rows) or Jv = 0 (axis/motor/limit rows): exact up to float32 velocity rounding (~1e-7 * |p|).
-	check(max_dev < 1.0e-5, "linear momentum conserved through anchor, axis, motor and limit impulses (max dev %s, |p| %s)" % [max_dev, p0.length()])
+	# Every row has Jv_a = -Jv_b (anchor rows) or Jv = 0 (axis/motor/limit rows): exact up to float32 velocity rounding. That rounding is
+	# a random walk over ~480 steps x 100 iterations x 8 rows of equal-and-opposite impulse applications, each ~1e-7 * |p| = 6e-8:
+	# sqrt(3.8e5) * 6e-8 ~ 4e-5 as an upper estimate. The former 1e-5 only held because the old Baumgarte trajectory happened to land
+	# at 6e-6; the same unstabilized velocity solve (beta = 0, old and new code alike) gives 2.05e-5. A one-sided impulse would be
+	# orders of magnitude larger, so 5e-5 still detects any real momentum leak (the split channel adds exactly zero here).
+	check(max_dev < 5.0e-5, "linear momentum conserved through anchor, axis, motor and limit impulses (max dev %s, |p| %s)" % [max_dev, p0.length()])
 	check(s.joint.lower_limit_impulse() + s.joint.upper_limit_impulse() + absf(s.joint.motor_impulse()) >= 0.0, "scenario exercised the rows")
 
 
@@ -892,7 +924,14 @@ func test_e5_hinge_impulses_conserve_angular_momentum_up_to_the_constraint_error
 	var engaged: bool = false
 	for i in 480:
 		var c: Vector3 = s.joint.linear_error()  # error at prepare time (positions do not change between here and the solve)
+		var x_before: Array = [s.a.position, s.b.position]
 		s.world.step()
+		# Split displacement (M1.3): the pose correction moves x without changing p, so sum(x x p) changes by sum(m dx_split x v).
+		# dx_split = x_after - x_before - v_after * dt (the integrator moves x by (v + v_split) dt).
+		var bodies: Array = [s.a, s.b]
+		for k in 2:
+			var dx_split: Vector3 = bodies[k].position - x_before[k] - bodies[k].linear_velocity * DT
+			predicted += bodies[k].mass * dx_split.cross(bodies[k].linear_velocity)
 		# Anchor rows: dL_origin = C x lambda. Axis, motor and limit rows apply equal and opposite pure angular impulses: dL = 0.
 		var lambda: Vector3 = anchor_impulse(s.joint)
 		predicted += c.cross(lambda)
@@ -901,9 +940,9 @@ func test_e5_hinge_impulses_conserve_angular_momentum_up_to_the_constraint_error
 	var actual: Vector3 = s.world.total_angular_momentum() - l0
 	check(engaged, "motor/limit rows were active")
 	check(sum_abs > 1.0e-7, "the constraint-error term is not vacuous (sum |C x lambda| = %s)" % sum_abs)
-	# The measured change must equal the analytic C x lambda term; the remaining slack is float32 rounding of the
-	# ~1 kg m^2/s-scale angular momentum summed over 480 steps (~1e-6 each).
-	check_vec3_near(actual, predicted, 2.0e-4, "dL = sum C x lambda (actual %s, predicted %s)" % [actual, predicted])
+	# The measured change must equal the analytic C x lambda term plus the split-displacement term above; the remaining slack is
+	# float32 rounding of the ~1 kg m^2/s-scale angular momentum summed over 480 steps (~1e-6 each).
+	check_vec3_near(actual, predicted, 2.0e-4, "dL = sum C x lambda + split displacement term (actual %s, predicted %s)" % [actual, predicted])
 	check(actual.length() < 0.01 * l0.length() + 1.0e-3, "and it is small in absolute terms (|dL| %s of |L| %s)" % [actual.length(), l0.length()])
 
 

@@ -6,34 +6,45 @@
 Labels: **VERIFIED** (confirmed by inspection/execution), **REPORTED** (stated by an earlier agent, not re-confirmed), **UNVERIFIED** (not checked).
 
 ## 1. Assignment
-M1.2 — generic contact constraints with friction (unilateral normal contact and isotropic Coulomb friction between two rigid bodies), integrated with `SimConstraint`, `ConstraintRow`, `ConstraintSolver` and `SimWorld`.
-Explicitly authorized by the user. M1.3 and later work were **not** started.
+M1.3 — generic split-impulse stabilization: correct positional constraint error (ball anchor, hinge anchor, hinge axis alignment, violated hinge limit, contact penetration) through a separate split-velocity channel so the correction never changes physical velocity, momentum or kinetic energy.
+Explicitly authorized by the user. M2 and any other work were **not** started.
 
 ## 2. Git state
-- Base commit: `b877c008047fe7bcce06b332153c6856c120a00a` (`origin/main` at the time of work, contains the merged M1.1.1, PRs #3 and #4). VERIFIED with `git log`.
-- Work branch: `m1/contact-friction`, one commit "M1.2: implement generic contact constraints with friction" (`2975a6b25fd222005e8419e73198a8eceb1eb2e2`). The agent delivered it locally as a patch and ZIP and did not push or merge. The user subsequently published the branch and opened PR #5 (https://github.com/cybxrgen/multibody_motorcycle_sim/pull/5). PR #5 is awaiting review and user acceptance; it is not accepted and not merged, and `main` does not contain M1.2. VERIFIED against the remote branch and `main`; the PR's open/review state is REPORTED by the user.
-- The previous handoff's statement that M1.1.1 was awaiting review was stale; Git history shows it merged. Reconciled in `PHASE_PLAN.md` and `PROJECT_STATE.md`. VERIFIED.
+- Base commit: `9af295c2230fafe57511f8e8e59325911344c8da` (`main` at the time of work). It contains the merged M1.2 (PR #5) and M1.2.1 (PR #6). VERIFIED with `git log` and `git branch -r --contains`; the user's statement that both were accepted is consistent with that history.
+- Work branch: `m1/split-impulse-stabilization`, one commit "M1.3: implement generic split-impulse stabilization" (hash in the delivery manifest and the final report; a file cannot contain its own hash). The branch is local only: not pushed, not merged, not published. The working tree was clean at the start. VERIFIED.
+- M1.3 is implemented and awaiting user review and acceptance. It is **not** accepted and not merged.
 
 ## 3. What was done
-- `Simulation/Solver/contact_constraint.gd` (new): `ContactConstraint`, 3 rows (normal, two tangent). Convention, Jacobians, biases, friction, tangent basis and warm start are in its header and `PHYSICS_CONVENTIONS.md` ("Contact"). Normal row: bounds `[0, +INF)`, speculative bias `g/dt` for `g >= 0`, Baumgarte `(beta/dt) g` for `g < 0` with `SimConfig.baumgarte_factor`. Friction: circular Coulomb limit, 2×2 block solve with K-metric projection, solved after the normal row each iteration; friction warm start stored as a world vector, projected to the current tangent plane and clipped to the current disk. Shared contact point (midpoint of the anchors) for all lever arms. Self-validating; `from_world()` factory.
-- Minimal generic solver extension: `SimConstraint.solve_iteration()` (default loops the rows as before); `ConstraintSolver` calls it per constraint. Reason: the friction disk couples two rows with the normal row's impulse, which per-row `[min, max]` clamps cannot express (`ARCHITECTURE.md` D11, D12). `ConstraintRow`, `SimWorld` and the joints are unchanged.
-- `Tests/test_contact.gd` (33 tests) plus generated `.uid` files.
-- Docs: `PHYSICS_CONVENTIONS.md`, `ARCHITECTURE.md`, `TESTING.md`, `PROJECT_STATE.md`, `PHASE_PLAN.md`, this file.
+- `ConstraintRow`: split fields (`split_enabled`, `split_bias`, split bounds, `split_accumulated_impulse`), `compute_split_velocity()`, `apply_split_impulse()`, `solve_split()`; the split impulse is reset in `prepare()` (no warm start).
+- `SimConstraint.solve_split_iteration()` (default: every row's split solve); `ConstraintSolver`: physical pass, then zero the split velocities of the involved bodies, then split pass. This is the whole solver extension (`ARCHITECTURE.md` D13–D15).
+- `SimRigidBody`: scratch `split_linear_velocity` / `split_angular_velocity` and `clear_split_velocity()`. `SimIntegrator.integrate_positions` uses `v + v_s` and `ω + ω_s`; `SimWorld` zeroes the split velocities before the solve and right after the position integration. Diagnostics and `velocity_at_point` still use physical velocity only.
+- `BallJointConstraint`, `HingeJointConstraint` (anchor, axis-alignment rows, violated limits), `ContactConstraint` (penetrating normal row): physical bias 0 (or the speculative `C/dt` while not violated), positional error through the split bias `(β/dt) C`. Motor, friction, speculative contact/limit biases and the contact normal impulse stay physical; friction reads the physical normal impulse only. `SimConfig.baumgarte_factor` is reused; no new parameter.
+- Tests: `Tests/test_split_impulse.gd` (28 tests, with `.uid`); ten existing tests updated (below).
+- Docs: `PHYSICS_CONVENTIONS.md` (split equations, channel table, consequences), `ARCHITECTURE.md` (pipeline, hooks, D13–D15, rejected options), `TESTING.md`, `PROJECT_STATE.md`, `PHASE_PLAN.md`, this file. `AGENTS.md` unchanged.
+
+### Existing tests that changed (all verified by measurement against the old tree; none by guesswork)
+Cause 1 — the test asserted the old Baumgarte velocity: `test_contact::test_penetration_correction…` (rewritten: pose moves by β|g|, zero velocity, displacement ∝ β); `test_hinge_joint::c5` (a violated limit now removes outward rate and moves the angle by β·violation instead of producing a positive rate).
+Cause 2 — the old Baumgarte velocity masked the frozen-Jacobian kinetic-energy loss of a spinning hinge: `a8`, `b5` now compare with the derived law `ω⁻² = ω₀⁻² + f dt t` (prediction 1.97065 vs measured 1.97091; angle 21.426 vs 21.410, 0.08 %), instead of `ω₀` within 1–2 %. β = 0 runs in the old and new tree give the identical unstabilized loss (0.96861), the old β = 0.2 run gave 0.9985.
+Cause 3 — the split displacement moves `x` without changing `p`, changing `Σ x×p`: `test_momentum`, `e5` and the contact angular-momentum test with a 1 cm gap (the last one runs with the split channel off, the other two use the explicit decomposition `ΣC×λ + Σ m Δx_split×v`). A β = 0 attempt for `test_momentum` was rejected because the drift grew (0.017) without Baumgarte-limited error.
+Cause 4 — rounding: `e4` tolerance 1e-5 → 5e-5, justified by a √N random walk over ~3.8e5 impulse applications; the old code with β = 0 already gives 2.05e-5, the old 1e-5 held only through the old Baumgarte trajectory (6e-6). Split impulses add exactly zero physical momentum.
+Cause 5 — measurement phase / convergence: `test_constraints::two_dynamic_bodies` now measures anchor velocity right after the solve (the post-step value is a swing-phase-dependent frozen-Jacobian lag, 0.017 m/s peak in both trees); `test_contact::mixed_with_ball_joint_pendulum` uses 100 iterations because the cold-started split pass converges slower (16 mm vs 4.3 mm peak anchor error at 20 iterations, 4.0 vs 3.3 mm at 100). The latter two keep their original tolerances.
 
 ## 4. Verification (Godot 4.7.stable.official.5b4e0cb0f, linux x86_64, headless)
-Godot was not preinstalled; the official release zip was downloaded and its SHA-512 matched the published `SHA512-SUMS.txt`.
-1. Automated tests. VERIFIED: baseline on the base commit 130 passed, 0 failed (3967 checks). With the change: **163 passed, 0 failed, 0 skipped (4528 checks)**, exit 0, no `SCRIPT ERROR`.
+The binary came from the user's upload `Godot_v4_7-stable_linux_x86_64.zip` (extracted binary `Godot_v4.7-stable_linux.x86_64`); its checksum was not compared with a published one (provenance UNVERIFIED, version string as printed by the binary).
+1. Automated tests. VERIFIED: baseline on the base commit 163 passed, 0 failed (4528 checks). With the change: **191 passed, 0 failed, 0 skipped (4940 checks)**, exit 0, no `SCRIPT ERROR`.
 2. Import/parse. VERIFIED: fresh import (`.godot/` deleted) exit 0, no error/warning lines.
-3. Headless scene smoke. VERIFIED: `simulation_test.tscn` and `main.tscn`, 240 frames each, exit 0, no error/warning lines. Neither scene uses contacts.
+3. Headless scene smoke. VERIFIED: `simulation_test.tscn` and `main.tscn`, 240 frames each, exit 0, no error/warning lines. Neither scene uses contacts or reports the split channel.
 4. Visual inspection. **Not done.** UNVERIFIED.
-- Regression sensitivity. VERIFIED: ten injected defects; eight were caught by the first tests, two survived (Euclidean projection instead of K-metric, friction before normal). Two tests were added and both are now caught. After that addition only those two and the Baumgarte defect were re-run, not the full set of ten.
-- Test-writing lessons: exactness checks use `solve_in_place()` because `World.step()` adds the explicit gyroscopic term and moves bodies; three first-draft expectations were test errors (not simulator errors) and were corrected after analysis.
+- Regression sensitivity. VERIFIED: twelve injected defects; eleven caught by `test_split_impulse.gd`, one equivalent mutant (friction limit including the split impulse, benign while the physical pass completes before the split pass). The spurious motor split bias survived the first version of the tests and was caught after a pose check was added; only that one was re-run after the final test edits.
+- Old-implementation counterfactual. VERIFIED: with the old Baumgarte bias on the contact normal row nine tests of the new file fail (e.g. 0.48 m/s and 0.115 J left in a body by a 2 cm penetration).
 
 ## 5. Unresolved / notes
-- Contacts have no debug visualization and no scene uses them. UNVERIFIED visually.
-- Anchors are fixed to the bodies; the caller must re-seat them when the contact patch moves. Limitations list: `PROJECT_STATE.md` ("Contacts").
-- Duplicate registration of one constraint and `add_body()` of an already registered body remain unrejected (pre-existing).
-- Commit signing was configured in the environment; see the final report for whether the commit was signed.
+- **Frozen-Jacobian dissipation is now visible** (3.1 % kinetic energy per second at 2 rad/s, dt = 1/120; O(dt)). Previously masked by Baumgarte energy injection. The mitigations (sub-stepping, re-linearization, block solve) remain undecided: `PROJECT_STATE.md`. This matters for the planned fast-spinning wheels.
+- **Split impulses are cold started** (required), so high mass-ratio setups need more iterations (limitation in `PROJECT_STATE.md`).
+- `SimWorld.total_angular_momentum()` includes the split displacement term; it is documented and tested.
+- Contacts have no debug visualization and no scene uses them; visual behaviour of the corrected poses UNVERIFIED.
+- Tooling: `Tools/make_delivery.sh` is not executable in the repository; it was run with `bash`. The commit signing state is stated in the final report.
+- Two background mutation runs were interrupted by tool limits and left a mutated source file twice; both were detected and restored from a verified backup, and the final tree was re-verified (identical to the backup, 191/0 suite, clean import) before the commit. VERIFIED.
 
 ## 6. Next action
-Stop and wait for the user's review and acceptance of PR #5. Do not describe M1.2 as accepted or merged until the user says so. M1.3 is not authorized and must not be started; it requires a separate explicit assignment.
+Stop and wait for the user's review and acceptance of M1.3. Do not describe M1.3 as accepted or merged until the user says so. M2 is not authorized and must not be started; it requires a separate explicit assignment.
