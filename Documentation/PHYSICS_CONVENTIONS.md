@@ -47,7 +47,36 @@ test results and methodology → `TESTING.md`.
 - Angular impulse: Δω = I_world⁻¹ L.
 
 ## Rotational dynamics
-α = I_world⁻¹ (τ − ω × (I_world ω)) — the gyroscopic term is included.
+Continuous equation: `I_w ω̇ = τ − ω × (I_w ω)`, i.e. `α = I_w⁻¹ (τ − ω × I_w ω)`; the gyroscopic term is included. Equivalently the world angular momentum
+`L = I_w ω` obeys `L̇ = τ`. In the body frame (`R` = local→world, `I` = local inertia, `ω_b = Rᵀω`, `L_b = I ω_b = RᵀL`):
+`L̇_b = L_b × I⁻¹ L_b + τ_b` (Euler's equations). Torque-free motion has two quadratic invariants, `|L_b|² = |L|²` and `T = ½ L_b·I⁻¹ L_b`, and since
+`|L|²/(2 I_max) ≤ T ≤ |L|²/(2 I_min)` the angular speed of a torque-free body stays in `[|L|/I_max, |L|/I_min]` forever.
+
+**Discrete update (`SimIntegrator.integrate_velocities`), per step, current orientation `R`:**
+1. Torque kick (world frame, as before): `ω* = ω + dt I_w⁻¹ τ`.
+2. Gyroscopic update, implicit midpoint on Euler's equations in the body frame: `L_b = I Rᵀ ω*`, then solve
+   `L' = L_b + dt · Lm × (I⁻¹ Lm)`, `Lm = (L_b + L')/2`, by Newton iteration in float64 (3×3 Jacobian `J = (dt/2)([Lm]ₓ I⁻¹ − [I⁻¹ Lm]ₓ) − 1`, start `L' = L_b`,
+   stop when the Newton step is below `1e-12 |L_b|`, at most 24 iterations; typically 3–5).
+3. `ω' = ω* + R I⁻¹ (L' − L_b)`: only the increment is transformed to the world frame, so a body whose `L_b` does not change (zero spin, principal-axis spin,
+   isotropic body) keeps its angular velocity bit for bit.
+4. Orientation (`integrate_positions`, unchanged): `q' = exp(dt (ω' + ω_split)/2) q`, normalized.
+
+**Numerical properties.**
+- The midpoint rule conserves every quadratic invariant of the flow exactly. `(Lm × y)·Lm = 0` gives `|L'|² − |L_b|² = 2 dt (Lm × I⁻¹Lm)·Lm = 0`, and for symmetric `I⁻¹`
+  `T' − T = dt (Lm × I⁻¹Lm)·I⁻¹Lm = 0`. Hence `|L|` and `T` of a torque-free body are conserved to the Newton tolerance and the float32 storage of the result,
+  **independent of dt**, and `|ω|` cannot run away (bound above). Solve inputs are not clamped and nothing is damped or renormalized.
+- Not conserved: the world-frame **direction** of `L`. The orientation is advanced with the end-of-step `ω'` (semi-implicit order, needed so that constraint
+  impulses act between the two phases), not with the midpoint angular velocity, so the world-frame precession of `L` errs by `O(dt)` per unit time, bounded in
+  measurements (`PROJECT_STATE.md`). The torque kick is first order (kick, then free rotation: Lie–Trotter splitting); with a torque the invariants above no longer apply.
+- Accuracy is first order overall. The trajectory of an unstable (intermediate-axis) rotation is exponentially sensitive to rounding and to dt; only the invariants and
+  the bounded range of `|ω|` are meaningful over long runs, not the phase of the tumbling.
+- Failure modes: non-finite input, a singular Newton matrix or non-convergence (only for `|ω| dt` far outside the regime of interest) make
+  `integrate_velocities` return false without touching the angular velocity; `SimWorld` then aborts the step (`ARCHITECTURE.md`, "Validation and failure behavior").
+- Rejected: the former **explicit** update `ω += dt I_w⁻¹(τ − ω × I_w ω)`. Its error in `T` is `+½ dt² c·I⁻¹c ≥ 0` per step (`c = ω × I_w ω`) and the same sign holds for
+  `|L|²`: both grow monotonically, faster as `|ω|` grows, until the iteration overflows (observed for the inspection-scene spinner after ~86 s at 120 Hz). A single
+  linearized implicit-Euler step (Newton once on the implicit Euler equations) was also prototyped: stable but dissipative (it removes `T` and `|L|` at `O(dt)` instead of
+  conserving them), so it would damp the tumbling it is meant to show. A fully consistent rotation update (Cayley/Lie-splitting with the mid-step angular velocity, exact
+  `L` direction) needs the free-rotor step to move into the position phase, after the constraint solve; deferred as a larger change to the step structure.
 
 ## Constraint Jacobian conventions
 - A row is `J = [Jv_a, Jw_a, Jv_b, Jw_b]` (world frame). Constraint velocity `Cdot = Jv_a·v_a + Jw_a·ω_a + Jv_b·v_b + Jw_b·ω_b`.
@@ -92,7 +121,7 @@ Several contact points are several independent constraints.
   Projection: `x(nu) = (K + nu I)^-1 K y` with `|x(nu)|` strictly decreasing in `nu >= 0`; `nu` is found by 60 bisection steps (float64) and the end of the bracket inside the disk is used, so the bound is never exceeded.
 - **Tangent basis.** `e` = world axis with the smallest `|n.e|`; `t1 = normalize(n x e)`, `t2 = n x t1` (right-handed with `n`), then both rotated about `n` by `tangent_rotation`. The block solve and the disk are rotation invariant, so results do not depend on the basis; it can be rebuilt every step.
 - **Warm starting.** Normal impulse: like every row (scaled by `warm_start_factor`, clamped to `[0, inf)`). Friction: stored between steps as a world vector (the basis changes with `n`), scaled by `warm_start_factor`, projected into the current tangent plane, then radially clipped to the disk of radius `mu * (warm-started lambda_n)` before it is applied; so the carried impulse is admissible for the current normal impulse and `mu`. Without warm starting both start at zero.
-- **Momentum.** Every row has `Jv_a = -Jv_b`; the lever arms share `p`. Total (physical) linear momentum is conserved, and the physical impulses conserve angular momentum about the origin up to float32 rounding (spheres in free flight; non-spherical bodies additionally carry the explicit gyroscopic error of the integrator). A split correction moves the bodies without changing their physical linear or angular velocity (and hence not `p = m v`); it can still change quantities computed from the corrected pose, see "Stabilization: split impulses".
+- **Momentum.** Every row has `Jv_a = -Jv_b`; the lever arms share `p`. Total (physical) linear momentum is conserved, and the physical impulses conserve angular momentum about the origin up to float32 rounding (spheres in free flight; non-spherical bodies additionally change the direction of their spin angular momentum through the gyroscopic update, see "Rotational dynamics"). A split correction moves the bodies without changing their physical linear or angular velocity (and hence not `p = m v`); it can still change quantities computed from the corrected pose, see "Stabilization: split impulses".
 - **Numerical assumptions.** Rows use the Jacobians linearized at the start of the step (see the frozen-Jacobian limitation in `PROJECT_STATE.md`). Tests of a single-row solve use `1e-5` for float32 quantities of order 1.
 
 ## Stabilization: split impulses
@@ -131,5 +160,6 @@ Position error (constraint drift, contact penetration, a violated hinge limit) i
   Tighter tolerances are legitimate only for float64 scalars (e.g. accumulator and simulation-time arithmetic) or exact discrete solutions computed in float64; see `TESTING.md`.
 - Consequence for future work: long-running or large-coordinate scenes lose position resolution (float32 at 100 m ~ 8e-6 m).
   A double-precision Godot build (`precision=double`) is the migration path if this becomes limiting; record any such decision here.
+- The gyroscopic solve is evaluated in float64 scalars; its inputs and its result pass through float32 `Vector3`/`Basis`, so `|L|` and `T` carry float32 round-off (random-walk, ~1e-6 relative over 10⁴ steps).
 - Frame-clamp interplay: `max_frame_time / fixed_timestep` (0.1 s -> 12 steps) exceeds `max_steps_per_frame` (10), so the step cap is
   the binding limit for frames longer than ~0.083 s; the remaining backlog is dropped and reported in `dropped_time`.

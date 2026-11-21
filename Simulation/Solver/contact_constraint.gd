@@ -298,6 +298,12 @@ func finish() -> void:
 	_friction_impulse = friction_impulse_world()
 
 
+## Also discards the carried world-space friction impulse (warm-start state that does not live in a row).
+func reset_warm_start() -> void:
+	super()
+	_friction_impulse = Vector3.ZERO
+
+
 func _solve_friction() -> void:
 	if not _k_valid:
 		return

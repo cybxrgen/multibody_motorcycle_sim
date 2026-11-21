@@ -66,3 +66,11 @@ func solve_split_iteration() -> void:
 
 func finish() -> void:
 	pass
+
+
+## Invalidates all carried solver state (the warm-start impulses of every row). SimWorld calls it after an aborted step, when
+## the carried impulses may be partially updated or non-finite. Not called in a normal step. A constraint that keeps warm-start
+## state outside its rows (e.g. ContactConstraint's friction impulse) overrides this and must also call super().
+func reset_warm_start() -> void:
+	for row in rows:
+		row.reset_impulses()
