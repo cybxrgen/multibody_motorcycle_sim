@@ -8,7 +8,7 @@ equations and sign conventions → `PHYSICS_CONVENTIONS.md`; test methodology �
 Describes only modules that exist; planned systems are not listed here until they are built.
 
 ## Principle
-One authoritative simulation (`SimWorld`) owns all physical state. Motorcycle parts and rider segments will be independent rigid bodies coupled
+One authoritative simulation (`SimWorld`) owns all physical state. Motorcycle parts (M2.1: five rigid bodies, four hinges) are independent rigid bodies, and rider segments will be, coupled
 only through constraints. Godot nodes only visualize published state. The core is generic: no vehicle or rider special cases.
 
 ## Modules
@@ -26,14 +26,20 @@ only through constraints. Godot nodes only visualize published state. The core i
 | `Simulation/Solver/hinge_joint_constraint.gd` | Hinge: 8 rows (3 anchor, 2 axis alignment, motor, lower limit, upper limit), continuous angle, torque→impulse cap; extends `SimConstraint`, uses `ConstraintRow` unchanged, solved by the unchanged `ConstraintSolver` |
 | `Simulation/Solver/contact_constraint.gd` | Generic one-point contact: unilateral normal row (speculative physical bias; penetration removed through its split channel) + isotropic Coulomb friction (two tangent rows solved as one 2×2 block and projected onto a disk); extends `SimConstraint`, reuses `ConstraintRow`, validates its own data |
 | `Simulation/Solver/constraint_solver.gd` | prepare → iterate `solve_iteration()` of each active constraint (physical pass) → zero the split velocities of the bodies involved → iterate `solve_split_iteration()` (split pass) → finish; generic (no body-type or contact logic) |
+| `Simulation/Motorcycle/motorcycle_body_spec.gd`, `motorcycle_joint_spec.gd` | Plain data for one body (name, mass, COM inertia tensor, COM pose, box proxy size) and one hinge (world pivot, world axis) |
+| `Simulation/Motorcycle/motorcycle_config.gd` | `MotorcycleConfig`: the five body specs, four joint specs and wheel dimensions; `validate()` (single home of the rules, one message per violated rule); `wheel_inertia()` hollow-cylinder helper |
+| `Simulation/Motorcycle/motorcycle_builder.gd` | `MotorcycleBuilder.build(config, world = null)`: validates, creates the five bodies and four `HingeJointConstraint`s (via `from_world`) in one `SimWorld`, self-checks the construction contract, rolls back on any failure; `hinge_reference()`, `construction_error()` |
+| `Simulation/Motorcycle/motorcycle_assembly.gd` | Result object: the world plus named references to the five bodies and four joints; `bodies()`, `joints()`, `total_mass()`, `max_anchor_error()`, `max_axis_error()`. Owns no physical state |
+| `Simulation/Motorcycle/motorcycle_prototype.gd` | `MotorcyclePrototype.config()`: ILLUSTRATIVE fixture values (not a real motorcycle), derived from a few named dimensions |
 | `Simulation/Debug/debug_draw_3d.gd`, `simulation_debug.gd` | Line batcher (ImmediateMesh); world axes, COM markers, local axes, joint anchors, text report |
-| `Simulation/Presentation/body_visual_proxy.gd`, `simulation_renderer.gd` | Interpolated primitive-mesh proxies, read-only |
+| `Simulation/Presentation/body_visual_proxy.gd`, `simulation_renderer.gd` | Interpolated primitive-mesh proxies, read-only; a proxy mesh may be offset from the COM frame and a body may have several proxies (wheel cylinder + spoke markers) |
 | `Scenes/main.tscn`, `Scenes/simulation_test.tscn` (+ `.gd`) | Entry scene; inspection scenario (double pendulum, free spinner), camera, HUD, key controls |
+| `Scenes/motorcycle_test.tscn` (+ `.gd`) | M2.1 demonstration: the prototype assembly in zero gravity with zero-momentum initial relative rotations; reads published state only |
 | `Tests/` | Headless runner, assertion base class, test files (see `TESTING.md`) |
 | `Tools/make_delivery.sh` | Verified ZIP + manifest + SHA-256 (three separate files) from an exact commit; see `AGENTS.md` §7 |
 
 ## Dependency rule
-`Presentation/Debug → Core/Solver`, never the reverse. Core and Solver are scene-tree free (`RefCounted`; `SimConfig` is a `Resource`).
+`Presentation/Debug → Core/Solver`, never the reverse. `Motorcycle → Core/Solver` only: Core and Solver never reference `Motorcycle`, and `Motorcycle` never references the scene tree, `Presentation` or `Debug`. Core and Solver are scene-tree free (`RefCounted`; `SimConfig` is a `Resource`).
 Scripts reference each other through `preload` constants (no `class_name`), so headless runs need no import step.
 
 ## State ownership and data flow
@@ -89,6 +95,31 @@ after the solve, possibly with non-finite values. An abort therefore **invalidat
 to every normal step to preserve warm-start values of a world that, after a fault, has to be inspected and repaired by the caller anyway. The hinge angle tracker needs no handling:
 the solver only samples the unchanged start-of-step poses, which equal the restored poses.
 
+## Motorcycle assembly (M2.1)
+`Simulation/Motorcycle/` builds the vehicle **on top of** the generic simulator; it adds no motorcycle logic to `Simulation/Core` or `Simulation/Solver`.
+Body / joint graph (hinge between A and B; every joint is an unmodified `HingeJointConstraint`, all registered in one `SimWorld` with their bodies):
+
+```
+chassis --steering_head (axis: raked steering axis)--> steering (fork + stem + front-wheel carrier, ONE rigid body)
+   |                                                        \--front_axle (+X)--> front_wheel
+   \--swingarm_pivot (+X)--> swingarm --rear_axle (+X)--> rear_wheel
+```
+All five bodies are dynamic with their own mass and full inertia tensor about their own COM; nothing is merged into the chassis. The assembly has no limits, motor,
+spring, damper, ground, tire or drive: each hinge frees exactly one relative rotation and constrains the other five relative DOF (3 translation, 2 rotation), so the
+assembly is a free 5-body tree with 4 internal rotational DOF.
+
+Construction contract: the configuration gives geometry **once**, in world coordinates at the reference pose (COM poses, and for each hinge a pivot point and axis). The
+builder derives each body's local anchor, axis and reference direction with `HingeJointConstraint.from_world`, using one deterministic world reference direction per hinge
+(`hinge_reference`: the world basis vector least aligned with the axis, projected perpendicular to it). The two local axes and reference vectors of a hinge are therefore
+generally different vectors (fork frame rotated by the rake, swingarm frame by its tilt), while the world frames coincide: zero anchor error, zero axis error, zero angle.
+`construction_error()` re-checks this (anchors 1e-5 m, axes 1e-5 rad) on the finished assembly. Failure policy follows `add_body` / `add_constraint` / `from_world`:
+`build()` returns null with `push_error`; an invalid configuration is rejected before anything is registered, and any later failure (mass properties, `add_body`, hinge
+creation, `add_constraint`, construction contract) removes exactly the bodies and constraints this call added (a passed-in world keeps its earlier content; body ids are not reused).
+The prototype fixture is deliberately separate from the schema (`motorcycle_prototype.gd`) and is labelled illustrative.
+
+Sign conventions of the fixture (not of the schema; the axis sign in the config defines the positive angle): steering hinge positive = steering left; swingarm positive = rear end down;
+wheel axle +X, so rolling forward is a negative rate about the axle axis.
+
 ## Solver design
 - Rows are scalar and solved sequentially (Gauss-Seidel); a ball joint is three rows along world axes, so its 3×3 block is not solved simultaneously.
   `solver_iterations` is configurable. Each iteration calls `SimConstraint.solve_iteration()` on every active constraint: the default solves its rows in order; a constraint whose rows are coupled overrides it.
@@ -121,6 +152,9 @@ the solver only samples the unchanged start-of-step poses, which equal the resto
 
 - D16: the gyroscopic update is the implicit midpoint rule in the body frame (not the explicit term). Chosen because the explicit term has a one-signed second-order error that raises `T` and `|L|` every step and diverged for the inspection-scene spinner; the midpoint rule conserves exactly the two invariants that bound `|ω|`, adds no damping, needs no tuning parameter, and changes only `integrate_velocities` (torque path, orientation update, solver and split impulses untouched; bodies that do not change `L_b` are bit-identical to before).
 - D17: numerical faults abort the step and roll back to the start-of-step state instead of clamping or repairing. Visible failure over hidden correction (D6); rollback keeps the world finite for diagnosis and keeps the renderer from ever receiving a non-finite transform.
+- D18: the motorcycle is built from world-space geometry through `HingeJointConstraint.from_world`, not from per-body local offsets typed into the builder. Chosen so that anchors, axes and reference directions cannot disagree and the "bodies do not share local orientations" case (rotated fork and swingarm frames) is handled by the existing hinge convention instead of new code. Rejected: per-body local frames in the configuration (duplicated, unexplained offsets); a motorcycle-specific joint or a new constraint type (out of scope, and the generic hinge suffices).
+- D19: the builder is all-or-nothing: validate first, register, then roll back exactly what it added on any failure; the construction check is a public function so it can be tested (honest input cannot trip it: pivots far from the origin stay self-consistent on the float32 grid, measured at 1e6 m).
+- D20: M2.1 hinges are free (no limits, no motor): limits and actuators belong to later, explicitly authorized milestones; a hidden limit or stabilizer would be a hidden corrective force (`AGENTS.md` §4).
 
 ### Rejected / deferred options (with reasons)
 - Explicit gyroscopic term (previous implementation): unconditionally energy- and momentum-increasing, unstable over long runs (`PHYSICS_CONVENTIONS.md`). Single-step linearized implicit Euler gyroscopic solve: stable but dissipative, would damp intermediate-axis tumbling. Moving the free-rotor step into the position phase (exact `L` direction): larger change to the step structure; deferred.
@@ -133,4 +167,4 @@ the solver only samples the unchanged start-of-step poses, which equal the resto
 ## Visualization contract
 `Scenes/simulation_test.gd` is the only runner: `world.advance(frame_delta)` (fixed-step accumulator) then `renderer.render(alpha)` /
 `debug_overlay.update_overlay(alpha)`, where alpha = `world.interpolation_alpha()`. Proxies and overlay read `previous_state`/`published_state` and never write bodies.
-Mesh origin = body COM. Scenes build their node trees in code; the `.tscn` files only attach scripts. Controls: Space pause, N step, R reset, L/C/J toggles, mouse orbit/zoom.
+`Scenes/motorcycle_test.gd` follows the same contract (advance, then render published state); its initial conditions are applied once when the scenario is built, never during the run. Mesh origin = body COM (a proxy mesh may carry a fixed offset). Scenes build their node trees in code; the `.tscn` files only attach scripts. Controls: Space pause, N step, R reset, L/C/J toggles, mouse orbit/zoom.

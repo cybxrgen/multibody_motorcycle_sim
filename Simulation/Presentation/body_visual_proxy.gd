@@ -12,8 +12,10 @@ func _init() -> void:
 	add_child(_mesh_instance)
 
 
-func setup(p_body, mesh: Mesh, color: Color) -> void:
+## `mesh_offset` places the mesh relative to the body's COM frame (presentation only; several proxies may share one body).
+func setup(p_body, mesh: Mesh, color: Color, mesh_offset: Transform3D = Transform3D.IDENTITY) -> void:
 	body = p_body
+	_mesh_instance.transform = mesh_offset
 	var material: StandardMaterial3D = StandardMaterial3D.new()
 	material.albedo_color = color
 	_mesh_instance.mesh = mesh

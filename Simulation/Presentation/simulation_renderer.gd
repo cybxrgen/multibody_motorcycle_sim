@@ -20,6 +20,11 @@ func add_sphere(body, radius: float, color: Color) -> void:
 	_add(body, mesh, color)
 
 
+## Any mesh, placed relative to the body's COM frame by `mesh_offset`. A body may have several proxies.
+func add_mesh(body, mesh: Mesh, color: Color, mesh_offset: Transform3D = Transform3D.IDENTITY) -> void:
+	_add(body, mesh, color, mesh_offset)
+
+
 func clear() -> void:
 	for p in proxies:
 		p.queue_free()
@@ -31,8 +36,8 @@ func render(alpha: float) -> void:
 		p.apply_state(alpha)
 
 
-func _add(body, mesh: Mesh, color: Color) -> void:
+func _add(body, mesh: Mesh, color: Color, mesh_offset: Transform3D = Transform3D.IDENTITY) -> void:
 	var proxy: BodyVisualProxy = BodyVisualProxy.new()
 	add_child(proxy)
-	proxy.setup(body, mesh, color)
+	proxy.setup(body, mesh, color, mesh_offset)
 	proxies.append(proxy)
