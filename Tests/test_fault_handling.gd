@@ -284,6 +284,77 @@ func test_c2_contact_friction_warm_start_is_not_left_contaminated_by_a_fault() -
 	check(_rows_are_finite(contact), "impulses finite after recovery")
 
 
+## An invalid pose of a STATIC body (corrupted by the caller before step()) must be detected before the constraint solver can
+## consume it. The registered ball joint is the observer: its prepare() must not be entered with the invalid pose. Also pins the
+## documented recovery behaviour: the corruption predates the step, so the start-of-step snapshot already holds it and the rollback
+## restores the same invalid pose; clear_numerical_fault() alone does not repair it.
+func _check_static_pose_fault_before_solver(corrupt: Callable, quantity: String, label: String) -> void:
+	var s: Dictionary = _pendulum()
+	var w: SimWorld = s.world
+	var anchor: SimRigidBody = s.anchor
+	var bob: SimRigidBody = s.bob
+	var joint = s.joint
+	anchor.body_name = "anchor"
+	for i in 5:
+		check(w.step(), "%s: step %d succeeds" % [label, i + 1])
+	var biggest: float = 0.0
+	for v in _impulses(joint):
+		biggest = maxf(biggest, absf(v))
+	check(biggest > 1e-3, "%s: the joint carries real warm-start impulses before the corruption" % label)
+	var calls_before: int = joint.prepare_calls
+	var steps_before: int = w.step_count
+	var time_before: float = w.simulation_time
+	var bob_pos: Vector3 = bob.position
+	var bob_rot: Quaternion = bob.orientation
+	var bob_lv: Vector3 = bob.linear_velocity
+	var bob_av: Vector3 = bob.angular_velocity
+	var pub_bob: Vector3 = bob.published_state.position
+	var pub_anchor: Vector3 = anchor.published_state.position
+	var pub_anchor_q: Quaternion = anchor.published_state.orientation
+
+	corrupt.call(anchor)
+	check(not w.step(), "%s: step() reports the fault" % label)
+	check(w.numerical_fault.contains("body %d" % anchor.id) and w.numerical_fault.contains("anchor") and w.numerical_fault.contains(quantity), "%s: fault names the static body and quantity: %s" % [label, w.numerical_fault])
+	check(w.numerical_fault.contains("before the constraint solve"), "%s: detected at the pre-solve stage: %s" % [label, w.numerical_fault])
+	check(joint.prepare_calls == calls_before, "%s: the constraint was not prepared or solved with the invalid pose (prepare calls %d -> %d)" % [label, calls_before, joint.prepare_calls])
+	check(w.step_count == steps_before and w.simulation_time == time_before, "%s: aborted step not counted, time unchanged" % label)
+	check(bob.position == bob_pos and bob.orientation == bob_rot and bob.linear_velocity == bob_lv and bob.angular_velocity == bob_av, "%s: dynamic body restored exactly, not contaminated" % label)
+	check(_finite_dynamic(bob) and bob.published_state.position == pub_bob, "%s: dynamic body finite, its published state is the last valid one" % label)
+	check(anchor.published_state.position == pub_anchor and anchor.published_state.orientation == pub_anchor_q, "%s: invalid static pose was not published" % label)
+	check(_rows_are_finite(joint) and _rows_are_cold(joint), "%s: carried constraint impulses invalidated by the abort" % label)
+	check(not w.step() and w.last_error.contains("numerical fault") and w.advance(0.1) == 0, "%s: further steps refused" % label)
+	check(joint.prepare_calls == calls_before, "%s: refused steps do not touch the constraint either" % label)
+
+	# Recovery responsibility: the rollback restored the pose captured at the start of the aborted step, i.e. the corrupted one.
+	check(not _static_pose_valid(anchor), "%s: rollback restored the already-invalid static pose (it cannot know the last valid one)" % label)
+	w.clear_numerical_fault()
+	check(not w.step() and w.numerical_fault.contains("anchor") and joint.prepare_calls == calls_before, "%s: clear_numerical_fault() alone does not repair the body; the next step faults again" % label)
+	anchor.position = Vector3.ZERO
+	anchor.orientation = Quaternion.IDENTITY
+	w.clear_numerical_fault()
+	check(w.step() and w.numerical_fault == "" and w.step_count == steps_before + 1, "%s: stepping resumes once the caller restored a valid pose and cleared the fault" % label)
+
+
+func _static_pose_valid(b: SimRigidBody) -> bool:
+	var q: Quaternion = b.orientation
+	return b.position.is_finite() and is_finite(q.x) and is_finite(q.y) and is_finite(q.z) and is_finite(q.w)
+
+
+func _finite_dynamic(b: SimRigidBody) -> bool:
+	return _static_pose_valid(b) and b.linear_velocity.is_finite() and b.angular_velocity.is_finite()
+
+
+func test_d1_invalid_static_position_is_detected_before_the_constraint_solve() -> void:
+	_check_static_pose_fault_before_solver(func(b: SimRigidBody) -> void: b.position = Vector3(NAN, 0, 0), "position", "NaN position")
+	_check_static_pose_fault_before_solver(func(b: SimRigidBody) -> void: b.position = Vector3(0, INF, 0), "position", "inf position")
+
+
+func test_d2_invalid_static_orientation_is_detected_before_the_constraint_solve() -> void:
+	# The orientation setter normalizes: a NaN component stays NaN and a zero quaternion becomes non-finite.
+	_check_static_pose_fault_before_solver(func(b: SimRigidBody) -> void: b.orientation = Quaternion(NAN, 0, 0, 1), "orientation", "NaN orientation")
+	_check_static_pose_fault_before_solver(func(b: SimRigidBody) -> void: b.orientation = Quaternion(0, 0, 0, 0), "orientation", "zero orientation")
+
+
 func test_c3_successful_steps_keep_warm_starting() -> void:
 	# The reset runs only on abort: a normal run must carry impulses from step to step exactly as before.
 	var s: Dictionary = _pendulum()

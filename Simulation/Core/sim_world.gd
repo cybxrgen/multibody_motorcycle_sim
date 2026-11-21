@@ -223,7 +223,7 @@ func _step_unchecked() -> bool:
 			_abort_step("body %d (%s): implicit gyroscopic solve failed (non-finite input or no convergence, |w| dt = %s)" % [body.id, body.body_name, body.angular_velocity.length() * dt])
 			return false
 		body.clear_split_velocity()
-	var fault: String = _invalid_state_description(false)
+	var fault: String = _invalid_state_description(true)  # poses too: the solver must never consume an invalid pose (static bodies included)
 	if fault != "":
 		_abort_step(fault + " after velocity integration (before the constraint solve)")
 		return false
