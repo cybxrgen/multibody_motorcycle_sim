@@ -160,8 +160,8 @@ Remote publication status: Awaiting user publication
 Remote review status:       Not yet available
 ```
 These two lines describe the status at the time of that delivery report; they are not a permanent assertion once the user has acted.
-and states explicitly that: the patch was generated and verified locally; the ZIP, manifest and checksum were generated and verified; the agent did not push or merge;
-the user must publish the resulting branch before remote review can take place; the agent has stopped and is awaiting instructions.
+Every final report must also state explicitly that: the patch was generated and verified locally; the ZIP, manifest, and checksum were generated and verified; the agent did not push or merge;
+the user must publish the resulting branch before remote review can take place; and the agent has stopped and is awaiting instructions.
 
 ## 8. Handoff requirements
 At the end of every assignment (completed or interrupted) replace `Documentation/HANDOFF.md` with one delivery-time handoff that answers:
