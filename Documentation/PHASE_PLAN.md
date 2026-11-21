@@ -16,7 +16,7 @@ constraints a vehicle/rider simulation needs, with no motorcycle- or rider-speci
 3. Remaining project-wide limitations are recorded in `PROJECT_STATE.md`.
 Per-milestone acceptance criteria are defined by the assignment that authorizes the milestone.
 
-**Current milestone: M1.3 (implemented and merged into `main`; formal acceptance by the user still pending).** Git integration and milestone acceptance are separate: merging does not accept the milestone. M1 is not complete until the user explicitly accepts M1.3. M2 is not authorized and starts only on an explicit user assignment.
+**Current milestone: M1.3 (formally accepted by the user; implemented and merged into `main`).** Git integration and milestone acceptance are separate facts, and both now hold for M1.3. Whether M1 as a whole is complete is the user's decision against the criteria above. M2 is not authorized and starts only on an explicit user assignment.
 
 ### Milestones
 | Milestone | Status |
@@ -25,7 +25,7 @@ Per-milestone acceptance criteria are defined by the assignment that authorizes 
 | M1.1.1 Constraint/world body-membership validation | Complete (accepted and merged by the user) |
 | M1.2 Contact (unilateral) constraints with friction | Complete (accepted and merged by the user) |
 | M1.2.1 Handoff documentation correction | Complete (accepted and merged by the user) |
-| M1.3 Split-impulse stabilization (including follow-ups M1.3.1, M1.3.2) | Implemented, verified and merged into `main` (Git status); formal acceptance by the user is pending (verification in `PROJECT_STATE.md`) |
+| M1.3 Split-impulse stabilization (including follow-ups M1.3.1, M1.3.2) | Complete (formally accepted by the user; merged into `main`; verification in `PROJECT_STATE.md`) |
 
 ## Next phase: M2 — Motorcycle
 **Objective:** build the motorcycle as independent rigid bodies coupled only through M1 joints and contacts: chassis, steering/fork, swingarm, wheels,
