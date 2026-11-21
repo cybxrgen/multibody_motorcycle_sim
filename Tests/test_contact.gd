@@ -237,12 +237,13 @@ func test_speculative_contact_prevents_crossing() -> void:
 	check(s.contact.normal_impulse() == 0.0, "approach slower than gap/dt: inactive")
 
 
-func test_penetration_correction_is_bounded_and_uses_baumgarte_factor() -> void:
-	# Pure Baumgarte: at rest with 2 cm penetration the contact pushes apart at beta*|g|/dt.
+func test_penetration_correction_is_split_impulse_scaled_by_the_baumgarte_factor() -> void:
+	# Since M1.3 the penetration is removed by the split channel: the pose moves by beta*|g| in one step and NO physical velocity
+	# is added (the former Baumgarte bias left beta*|g|/dt = 0.48 m/s in the body).
 	var s = ground_ball(Vector3.ZERO, 0.48, Vector3.ZERO, 0.0)
 	var beta: float = s.world.config.baumgarte_factor
 	s.world.step()
-	check_near(s.ball.linear_velocity.y, beta * 0.02 / DT, 1e-4, "push-out speed beta*|g|/dt")
+	check(s.ball.linear_velocity == Vector3.ZERO, "no push-out velocity")
 	check_near(s.contact.gap(), -0.02 * (1.0 - beta), 1e-6, "a fraction beta of the penetration is removed in one step")
 	# Scales linearly with the configured factor (no separate stabilization parameter).
 	var s_low = ground_ball(Vector3.ZERO, 0.48, Vector3.ZERO, 0.0)
@@ -251,11 +252,13 @@ func test_penetration_correction_is_bounded_and_uses_baumgarte_factor() -> void:
 	var s_high = ground_ball(Vector3.ZERO, 0.48, Vector3.ZERO, 0.0)
 	s_high.world.config.baumgarte_factor = 0.4
 	s_high.world.step()
-	check_near(s_high.ball.linear_velocity.y / s_low.ball.linear_velocity.y, 4.0, 1e-4, "push-out speed proportional to beta")
+	check_near((s_high.ball.position.y - 0.48) / (s_low.ball.position.y - 0.48), 4.0, 1e-3, "displacement proportional to beta")
+	check(s_high.ball.linear_velocity == Vector3.ZERO and s_low.ball.linear_velocity == Vector3.ZERO, "still no physical velocity")
 	var s_zero = ground_ball(Vector3.ZERO, 0.48, Vector3.ZERO, 0.0)
 	s_zero.world.config.baumgarte_factor = 0.0
 	s_zero.world.step()
-	check(s_zero.ball.linear_velocity.y == 0.0, "beta = 0: no positional correction (only the velocity constraint)")
+	check_near(s_zero.ball.position.y, 0.48, 1e-7, "beta = 0: no positional correction (float32 position)")
+	check(s_zero.ball.linear_velocity == Vector3.ZERO, "beta = 0: and no velocity either")
 	# Under gravity the penetration never grows beyond what one correction step leaves and converges to contact.
 	var g = ground_ball(Vector3(0, -G, 0), 0.48, Vector3.ZERO, 0.0)
 	var deepest: float = 0.0
@@ -599,6 +602,10 @@ func test_angular_momentum_about_origin_conserved() -> void:
 		check_vec3_near(l, l0, 1e-4, "step %d: angular momentum about the origin" % i)
 	# Same with a gap (anchors not coincident): the shared midpoint keeps the impulses collinear.
 	var w = make_world(Vector3.ZERO)
+	# The split-impulse pose correction of the penetrating gap moves the bodies without changing their momentum, which changes
+	# sum(x x p) by sum(dx x p) (0.002 here: beta * 1 cm times p_x = 0.5 ... measured 0.00208). It is tested in test_split_impulse.gd (d8);
+	# this check is about the physical impulses at the shared point, so the split channel is off.
+	w.config.baumgarte_factor = 0.0
 	var a = make_sphere(2.0, 0.4, Vector3(0, 0, 0))
 	var b = make_sphere(1.0, 0.3, Vector3(0.0, 0.69, 0.0))
 	w.add_body(a)
@@ -649,6 +656,10 @@ func test_disabled_contact_has_no_effect() -> void:
 func test_mixed_with_ball_joint_pendulum() -> void:
 	# Existing joints keep working next to contacts: a 1.2 m pendulum whose bob would dip 0.2 m below the ground plane.
 	var w = make_world(Vector3(0, -G, 0))
+	# 100 iterations: the split correction is cold started every step (never warm started), unlike the former Baumgarte term, so a
+	# 0.1 m sphere on a 1.2 m arm (mass ratio ~100) needs more iterations for the same anchor accuracy. Measured peak anchor error:
+	# 16 mm at 20 iterations, 4.0 mm at 100 (3.3 mm with the old warm-started Baumgarte bias). See PROJECT_STATE.md.
+	w.config.solver_iterations = 100
 	var pivot = make_static(Vector3(0, 1.5, 0))
 	var ground = make_static()
 	var bob = make_sphere(1.0, 0.1, Vector3(1.2, 1.5, 0))

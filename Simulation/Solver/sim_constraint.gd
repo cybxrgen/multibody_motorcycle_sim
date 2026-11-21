@@ -55,5 +55,14 @@ func solve_iteration() -> void:
 		row.solve()
 
 
+## One iteration of the split-impulse (positional correction) pass over this constraint. Same structure as solve_iteration():
+## the default solves every row's split channel in order (rows with split_enabled = false do nothing). It only touches the
+## bodies' split velocities. A constraint whose physical solve is coupled does not need to override this unless its split rows
+## are coupled too (none are).
+func solve_split_iteration() -> void:
+	for row in rows:
+		row.solve_split()
+
+
 func finish() -> void:
 	pass

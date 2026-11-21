@@ -32,6 +32,13 @@ var orientation: Quaternion = Quaternion.IDENTITY:
 var linear_velocity: Vector3 = Vector3.ZERO
 var angular_velocity: Vector3 = Vector3.ZERO
 
+## Split-impulse (pseudo) velocities: SOLVER SCRATCH, not physical state. They carry positional constraint correction only
+## (M1.3, PHYSICS_CONVENTIONS.md "Split-impulse stabilization"): they are zeroed before the solver of every fixed step, written
+## only by the split solve, added to the physical velocities only inside the position integration, and zeroed again right after
+## it. They are never part of momentum, kinetic energy, motor/friction/contact velocity or the published state.
+var split_linear_velocity: Vector3 = Vector3.ZERO
+var split_angular_velocity: Vector3 = Vector3.ZERO
+
 var force_accumulator: Vector3 = Vector3.ZERO
 var torque_accumulator: Vector3 = Vector3.ZERO
 
@@ -100,6 +107,11 @@ func apply_force_at_point(force: Vector3, world_point: Vector3) -> void:
 func clear_accumulators() -> void:
 	force_accumulator = Vector3.ZERO
 	torque_accumulator = Vector3.ZERO
+
+
+func clear_split_velocity() -> void:
+	split_linear_velocity = Vector3.ZERO
+	split_angular_velocity = Vector3.ZERO
 
 
 # --- Impulses (instantaneous velocity changes; never touch the accumulators) ---

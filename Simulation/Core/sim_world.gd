@@ -5,9 +5,10 @@ extends RefCounted
 ##  1. capture previous state (for render interpolation)
 ##  2. accumulate gravity into force accumulators
 ##  3. integrate velocities (forces, torques, gyroscopic term)
-##  4. prepare + 5. solve constraints (velocity level, with Baumgarte bias as stabilization)
-##  6. integrate positions / orientations
-##  7. (stabilization is folded into step 5 as the Baumgarte bias; there is no separate position pass)
+##  4. zero the split (pseudo) velocities
+##  5. prepare + solve constraints: physical velocity pass, then split-impulse pass (positional correction, M1.3)
+##  6. integrate positions / orientations with physical + split velocities
+##  7. zero the split velocities again (they never persist; physical velocities are untouched by split impulses)
 ##  8. publish new state
 ##  9. clear force/torque accumulators
 
@@ -197,9 +198,11 @@ func _step_unchecked() -> void:
 			body.apply_force(config.gravity * body.mass)
 	for body in bodies:
 		SimIntegrator.integrate_velocities(body, dt)
+		body.clear_split_velocity()
 	_solver.solve(constraints, dt, config)
 	for body in bodies:
 		SimIntegrator.integrate_positions(body, dt)
+		body.clear_split_velocity()
 	for body in bodies:
 		body.published_state.capture_from(body)
 		body.clear_accumulators()

@@ -16,11 +16,11 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ##
 ## ---- Rows (always 8; inactive rows have impulse bounds [0, 0] and therefore do nothing) ----
 ##  0..2 anchor      C = (x_b + r_b) - (x_a + r_a), rows along world X, Y, Z (identical to BallJoint)
-##                   Jv_a = -e, Jw_a = -(r_a x e), Jv_b = +e, Jw_b = r_b x e,  bias = (beta/dt) C.e
+##                   Jv_a = -e, Jw_a = -(r_a x e), Jv_b = +e, Jw_b = r_b x e,  bias = 0 (physical), split_bias = (beta/dt) C.e
 ##  3,4  axis align  C_p = p.b, C_q = q.b. Both are zero exactly when b = +-a. For a small misalignment
 ##                   they equal the rotation of b away from a about -q / +p, i.e. a sine-type angle error.
 ##                   Exact derivative (p, q rotate with A):  dC_p/dt = (w_a x p).b + p.(w_b x b)
-##                   =>  Jw_a = p x b,  Jw_b = b x p   (same for q). Jv = 0, bias = (beta/dt) C.
+##                   =>  Jw_a = p x b,  Jw_b = b x p   (same for q). Jv = 0, bias = 0 (physical), split_bias = (beta/dt) C.
 ##                   Both Jw are perpendicular to b (and to a when aligned), so rotation about the hinge axis is
 ##                   not constrained. p and q come from A's own reference direction, so the basis is never
 ##                   singular (no "pick any perpendicular" fallback) and works for any hinge orientation.
@@ -32,18 +32,21 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ##  6    lower limit C_l = angle - lower >= 0. Jw_a = -a, Jw_b = +a. Bounds [0, +INF): the impulse can only
 ##                   push the angle up.
 ##  7    upper limit C_u = upper - angle >= 0. Jw_a = +a, Jw_b = -a (Cdot = -d(angle)/dt). Bounds [0, +INF).
-##                   Limit bias (a unilateral row enforces Cdot + bias >= 0):
-##                     C >= 0 (inside): bias = C/dt   speculative: the row only engages if the angle would cross the
+##                   Limit biases (a unilateral row enforces Cdot + bias >= 0):
+##                     C >= 0 (inside): bias = C/dt   physical, speculative: the row only engages if the angle would cross the
 ##                                      limit within this step (angle + rate*dt < limit); not a correction, so no beta.
-##                     C <  0 (violated): bias = (beta/dt) C   Baumgarte, like every other row; pushes back.
-##                   The two branches meet at C = 0, so the bias is continuous.
+##                                      The split channel is inactive.
+##                     C <  0 (violated): physical bias = 0 (the limit may not be pushed further: Cdot >= 0), and the split
+##                                      channel corrects the violation: split_bias = (beta/dt) C, split bounds [0, +INF).
+##                   The physical bias is continuous at C = 0 (C/dt -> 0).
 ##
 ## ---- Motor / limit cooperation ----
 ## Before the motor row is built its target speed is clamped into the rate interval the enabled limit rows admit:
-##   rate >= -bias_lower  and  rate <= +bias_upper.
+##   rate >= -bias_lower  and  rate <= +bias_upper   (the PHYSICAL limit biases).
 ## The motor then never asks for a velocity a limit row forbids, so the two rows never push in opposite
 ## directions (a motor commanded into a stop settles on the speculative approach rate, then 0 at the stop)
-## and the motor can never push through a stop. The clamp uses the same biases as the limit rows.
+## and the motor can never push through a stop. A violated limit has physical bias 0, so the motor cannot drive further into
+## it; the violation itself is removed by the split channel, which the motor never sees. The clamp uses the same biases as the limit rows.
 ##
 ## ---- Continuous angle ----
 ## angle() = atan2(w.q, w.p) with w = R_b*reference_b: the signed rotation of B's reference about A's axis,
@@ -269,25 +272,29 @@ func _update_rows(dt: float, config) -> void:
 		row.angular_a = -_r_a.cross(e)
 		row.linear_b = e
 		row.angular_b = _r_b.cross(e)
-		row.bias = beta_over_dt * c.dot(e)
+		row.bias = 0.0
 		row.softness = 0.0
 		row.min_impulse = -INF
 		row.max_impulse = INF
+		_set_split(row, beta_over_dt * c.dot(e), -INF, INF)
 
 	# Axis alignment rows.
 	_set_axis_row(rows[ROW_AXIS_P], p, b, beta_over_dt * p.dot(b))
 	_set_axis_row(rows[ROW_AXIS_Q], q, b, beta_over_dt * q.dot(b))
 
-	# Limit biases (also needed to clamp the motor target).
+	# Limit biases (physical; also needed to clamp the motor target).
 	var bias_lower: float = 0.0
 	var bias_upper: float = 0.0
+	var gap_lower: float = theta - lower_limit
+	var gap_upper: float = upper_limit - theta
 	if limit_enabled:
-		bias_lower = _limit_bias(theta - lower_limit, dt, beta_over_dt)
-		bias_upper = _limit_bias(upper_limit - theta, dt, beta_over_dt)
+		bias_lower = _limit_bias(gap_lower, dt)
+		bias_upper = _limit_bias(gap_upper, dt)
 
 	# Motor row.
 	var motor_row = rows[ROW_MOTOR]
 	_set_hinge_axis_row(motor_row, a, 1.0)
+	motor_row.split_enabled = false
 	var motor_active: bool = motor_enabled and motor_max_torque > 0.0
 	if motor_active:
 		var target: float = motor_target_speed
@@ -312,25 +319,46 @@ func _update_rows(dt: float, config) -> void:
 		lower_row.max_impulse = INF
 		upper_row.min_impulse = 0.0
 		upper_row.max_impulse = INF
+		# Positional correction only for a violated limit (split bounds [0, +INF): it can only push back inside).
+		_set_limit_split(lower_row, gap_lower, beta_over_dt)
+		_set_limit_split(upper_row, gap_upper, beta_over_dt)
 	else:
 		_deactivate(lower_row)
 		_deactivate(upper_row)
 
 
-## Speculative bias while the limit is not yet violated, Baumgarte once it is (continuous at C = 0).
-static func _limit_bias(c: float, dt: float, beta_over_dt: float) -> float:
-	return c / dt if c >= 0.0 else beta_over_dt * c
+## Physical limit bias: speculative C/dt while the limit is not violated, 0 once it is (continuous at C = 0). The positional
+## correction of a violated limit is not part of it; it goes through the split channel (_set_limit_split).
+static func _limit_bias(c: float, dt: float) -> float:
+	return c / dt if c >= 0.0 else 0.0
 
 
-static func _set_axis_row(row, direction: Vector3, b: Vector3, bias: float) -> void:
+## Split channel of a limit row: active only while violated (C < 0), bias (beta/dt) C (negative), bounds [0, +INF).
+static func _set_limit_split(row, c: float, beta_over_dt: float) -> void:
+	if c < 0.0:
+		_set_split(row, beta_over_dt * c, 0.0, INF)
+	else:
+		row.split_enabled = false
+
+
+static func _set_split(row, split_bias: float, split_min: float, split_max: float) -> void:
+	row.split_enabled = true
+	row.split_bias = split_bias
+	row.split_min_impulse = split_min
+	row.split_max_impulse = split_max
+
+
+## Axis alignment row: physical bias 0, positional correction `split_bias` through the split channel.
+static func _set_axis_row(row, direction: Vector3, b: Vector3, split_bias: float) -> void:
 	row.linear_a = Vector3.ZERO
 	row.linear_b = Vector3.ZERO
 	row.angular_a = direction.cross(b)
 	row.angular_b = b.cross(direction)
-	row.bias = bias
+	row.bias = 0.0
 	row.softness = 0.0
 	row.min_impulse = -INF
 	row.max_impulse = INF
+	_set_split(row, split_bias, -INF, INF)
 
 
 ## Row along the hinge axis: Cdot = direction_sign * (w_b - w_a).a.
@@ -348,3 +376,4 @@ static func _deactivate(row) -> void:
 	row.bias = 0.0
 	row.min_impulse = 0.0
 	row.max_impulse = 0.0
+	row.split_enabled = false

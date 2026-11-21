@@ -4,7 +4,9 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ##   C    = (x_b + r_b) - (x_a + r_a),  r = R * local_anchor
 ##   Cdot = v_b + w_b x r_b - v_a - w_a x r_a
 ##   row along e: Jv_a = -e, Jw_a = -(r_a x e), Jv_b = +e, Jw_b = r_b x e
-##   bias = (beta/dt) * C . e          (Baumgarte, removes a fraction beta of the drift per step)
+##   bias = 0                          physical velocity channel: Cdot = 0 (no positional term)
+##   split_bias = (beta/dt) * C . e    split-impulse channel (M1.3): removes a fraction beta of the drift per step through the
+##                                     split velocities, which move the pose but never become physical velocity
 ## Either body may be static (zero inverse mass/inertia).
 
 var local_anchor_a: Vector3 = Vector3.ZERO
@@ -61,5 +63,9 @@ func _update_rows(dt: float, config) -> void:
 		row.angular_a = -_r_a.cross(e)
 		row.linear_b = e
 		row.angular_b = _r_b.cross(e)
-		row.bias = bias_scale * c.dot(e)
+		row.bias = 0.0
 		row.softness = 0.0
+		row.split_enabled = true
+		row.split_bias = bias_scale * c.dot(e)
+		row.split_min_impulse = -INF
+		row.split_max_impulse = INF

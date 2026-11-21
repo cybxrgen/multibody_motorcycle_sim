@@ -5,8 +5,11 @@ extends RefCounted
 ##   v'     = v + dt * F / m
 ##   omega' = omega + dt * I_w^-1 (tau - omega x (I_w omega))        <- explicit gyroscopic term
 ## Position update (uses the NEW velocities, which is what makes it semi-implicit):
-##   x' = x + dt * v'
-##   q' = exp(0.5 * dt * omega') * q     (world-frame rotation increment, exact for constant omega')
+##   x' = x + dt * (v' + v_split)
+##   q' = exp(0.5 * dt * (omega' + omega_split)) * q     (world-frame rotation increment, exact for constant omega)
+## v_split / omega_split are the split-impulse (positional correction) velocities of this step; they move the pose but are
+## never added to the stored physical velocities (PHYSICS_CONVENTIONS.md, "Split-impulse stabilization"). Both are zero for
+## a body no split impulse touched, which reproduces the previous update exactly.
 ##
 ## Assumptions / limitations (also in ARCHITECTURE.md):
 ##  - First-order accurate. The explicit gyroscopic term does not conserve kinetic energy or angular
@@ -29,8 +32,8 @@ static func integrate_velocities(body: SimRigidBody, dt: float) -> void:
 static func integrate_positions(body: SimRigidBody, dt: float) -> void:
 	if body.is_static():
 		return
-	body.position += body.linear_velocity * dt
-	var w: Vector3 = body.angular_velocity
+	body.position += (body.linear_velocity + body.split_linear_velocity) * dt
+	var w: Vector3 = body.angular_velocity + body.split_angular_velocity
 	var speed: float = w.length()
 	if speed * dt > 1.0e-12:
 		var delta: Quaternion = Quaternion(w / speed, speed * dt)

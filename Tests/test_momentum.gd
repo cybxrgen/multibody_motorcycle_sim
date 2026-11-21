@@ -65,7 +65,29 @@ func test_angular_momentum_conserved_without_external_torque() -> void:
 	var s = make_joined_pair()
 	var w = s.world
 	w.config.solver_iterations = 50
+	var dt: float = w.config.fixed_timestep
 	var l0: Vector3 = w.total_angular_momentum()
-	run_steps(w, 240)
-	var drift: float = (w.total_angular_momentum() - l0).length()
-	check(drift < 1e-3 * (l0.length() + 1.0), "angular momentum about origin conserved (drift=%s, |L0|=%s)" % [drift, l0.length()])
+	# No external torque: the change of angular momentum about the origin has exactly two sources (spheres: no gyroscopic term).
+	#  (1) the anchor impulses: dL = C x lambda (equal and opposite impulses applied C apart), C = anchor error at prepare time;
+	#  (2) the split-impulse pose correction (M1.3), which moves x without changing p: dL = sum m dx_split x v with
+	#      dx_split = x_after - x_before - v_after * dt (the integrator moves x by (v + v_split) dt).
+	# Before M1.3 only (1) existed and the drift stayed below 1e-3 (|L0| + 1) because the Baumgarte term kept C tiny; with the
+	# split channel off (beta = 0) C grows and (1) alone gives a drift of 0.017. The decomposition is the honest invariant.
+	var predicted: Vector3 = Vector3.ZERO
+	var term_split: float = 0.0
+	for i in 240:
+		var c: Vector3 = s.joint.linear_error()
+		var x_before: Array = [s.a.position, s.b.position]
+		w.step()
+		predicted += c.cross(s.joint.accumulated_impulse_on_b())
+		for k in 2:
+			var body = [s.a, s.b][k]
+			var dx_split: Vector3 = body.position - x_before[k] - body.linear_velocity * dt
+			var term: Vector3 = body.mass * dx_split.cross(body.linear_velocity)
+			predicted += term
+			term_split += term.length()
+	var actual: Vector3 = w.total_angular_momentum() - l0
+	check(term_split > 1.0e-4, "the split-displacement term is not vacuous (sum |m dx x v| = %s)" % term_split)
+	# Tolerance: float32 rounding of values of order 1 summed over 240 steps (~1e-6 each) = 2e-4, as in the hinge test e5.
+	check_vec3_near(actual, predicted, 2.0e-4, "dL = sum C x lambda + split displacement term (actual %s, predicted %s)" % [actual, predicted])
+	check(actual.length() < 0.02 * (l0.length() + 1.0), "and the drift stays small (%s of |L0| = %s)" % [actual.length(), l0.length()])
