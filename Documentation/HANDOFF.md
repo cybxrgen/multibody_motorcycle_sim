@@ -6,24 +6,33 @@
 Labels: **VERIFIED** (confirmed by inspection/execution), **REPORTED** (stated by an earlier agent, not re-confirmed), **UNVERIFIED** (not checked).
 
 ## 1. Assignment
-M1.3.2 — documentation-only wording corrections found in the review of PR #7, before M1.3 is accepted: (1) a malformed sentence about `L_spin` in `PHYSICS_CONVENTIONS.md`; (2) decision D14 in `ARCHITECTURE.md` read as if split velocities were never involved in diagnostics, which looked contradictory to the M1.3.1 regression test. Explicitly authorized by the user. No source, test or other document was changed. M1.4 and M2 were **not** started; M2 remains unauthorized.
+Investigate and fix the long-duration rotational instability of the inspection scene: the torque-free asymmetric spinner (box 0.6×0.3×0.15 m, ω₀ = (0.2, 6, 0.2) rad/s) gains angular velocity until, after ~85–100 s, `sim_integrator.gd` reports `The axis Vector3 (0.0, 0.0, 0.0) must be normalized` followed by `instance_set_transform: Condition "!v.is_finite()"` and NaN diagnostics. Scope: rotational integration stability, directly necessary numerical safeguards and regression tests only. M2 not started, not merged, not pushed.
 
 ## 2. Git state
-- Base commit: `29fff9433b5e7064288bc8bf993ee53a6e374a88`, the published M1.3.1 head of `m1/split-impulse-stabilization` (`origin/m1/split-impulse-stabilization`). Its tree is identical to the tree of the agent's original M1.3.1 commit `1e9da1e`; the SHAs differ because the user applied the patch with `git am` (recorded in both SHAs, not a defect). The M1.3 commit `27d0594` and the M1.3.1 commit are preserved unchanged. VERIFIED with `git log`, `git rev-parse` and `git merge-base --is-ancestor`.
-- Work branch `m1/split-impulse-stabilization`, one documentation-only follow-up commit on top of the base (hash in the delivery manifest and the final report; a file cannot contain its own hash). The working tree was clean at the start. Not pushed, not merged, PR state untouched, `main` untouched.
-- M1.3 is **not** accepted and not merged; it awaits user review and acceptance.
+- Base commit: `aabaee136d5d2fa6b49147c06f56e96fcb200f25` = `main` (VERIFIED). **Deviation from the assignment text:** PR #7 is already merged into `main` (merge commit `aabaee1`), and `main` has the same tree as `origin/m1/split-impulse-stabilization` (`d64d654`, M1.3.2); `git diff d64d654 aabaee1` is empty. The M1.3/M1.3.1/M1.3.2 work and its history are therefore present unchanged; the new branch is based on `main`. `PHASE_PLAN.md` still says M1.3 awaits acceptance (not changed here, the milestone decision is the user's) — **please reconcile**. The working tree was clean at the start; PR #7's web page was not inspected (no web access to the PR UI), only the Git history.
+- Work branch `m1/rotational-integration-stability`, one commit on top of the base (hash in the delivery manifest and the final report). Not pushed, not merged, `main` untouched.
 
-## 3. What was done
-- `PHYSICS_CONVENTIONS.md`, orientation-dependent quantities bullet: replaced "and `L_spin` turns off the direction of `w`" by a statement that rotating the body changes `I_w`, so `L_spin = I_w w` need not stay parallel to `w` (in the tested example parallel before the correction because `w` is on a principal axis, in general not after), hence the direction of `L_spin` changes although `w` does not. Equations, example and the rest of the bullet unchanged.
-- `ARCHITECTURE.md`, D14: separated direct isolation (split velocities are not part of physical velocity, momentum or energy diagnostics, not published, not warm started, not read by motor, friction or contact velocity) from indirect pose effects (integrated into the pose; split angular correction changes orientation and, for anisotropic bodies, the world inertia, so spin angular momentum and rotational kinetic energy can change although the physical `w` does not; not a use of split velocity by diagnostics). Refers to `PHYSICS_CONVENTIONS.md` instead of repeating the derivation.
-- This handoff replaced as `AGENTS.md` §8 requires; no other document touched.
+## 3. Diagnosis (VERIFIED by measurement, numbers in `PROJECT_STATE.md`)
+- Reproduced on the unmodified code: first non-finite state at step 10279 (t = 85.658 s, 120 Hz), also through the real scene with `--fixed-fps 60` (1 axis error + 3860 `instance_set_transform` errors). Failure time scales ~1/dt (160.3 s at 240 Hz): first-order error.
+- Root cause: the explicit gyroscopic update `ω += dt I_w⁻¹(−ω × I_w ω)` has a one-signed second-order error, `ΔT = +½ dt² c·I⁻¹c` (`c = ω × I_w ω`), and `|L|²` also grows every step. Kinetic energy rose from 1.06× (10 s) to 16× (80 s), `|ω|` from 6 to 24 rad/s; once `|ω| dt` reached ~3 the iteration became super-exponential (881 → 1.9e3 → 9.7e3 → … 4e18 rad/s in 0.05 s), overflowed float32 to `inf`, and `w / speed` became NaN, which is where the `Quaternion` constructor error appeared.
+- Not causes (measured): the quaternion constructor (only where the failure became visible), loss of orientation normalization (`||q|−1| ≤ 1.2e-7` up to the overflow), world inertia consistency, the ball joint (the failure is identical without it: the anchor is at the COM, no torque), the pendulum (independent bodies). The documented known limitation (explicit gyroscopic term) **is** the explanation; no second defect was found.
 
-## 4. Verification
-- VERIFIED: `git diff --check` clean; the diff touches only `Documentation/ARCHITECTURE.md`, `Documentation/PHYSICS_CONVENTIONS.md` and `Documentation/HANDOFF.md`; no source or test file changed.
-- Not run (documentation-only, `AGENTS.md` §5): the Godot suite, import and scene smokes. The last executed results (192 passed, 0 failed, 4973 checks; M1.3.1 run) are recorded in `PROJECT_STATE.md` and were not re-run here. Visual inspection: not done.
+## 4. What was done
+- `SimIntegrator.integrate_velocities`: torque kick unchanged; gyroscopic part replaced by an implicit midpoint step of Euler's equations in the body frame (Newton in float64, `solve_free_rotation`), conserving `|L|` and rotational `T` exactly, hence bounding `|ω|` for any dt. Only the increment is transformed to the world frame (bodies with unchanged `L_b` keep ω bit for bit). Returns false on non-finite input / non-convergence. `integrate_positions`: a non-finite ω no longer reaches the `Quaternion` constructor (not a repair, the world reports it).
+- `SimWorld`: state checks after velocity integration, after the solve and after position integration; a fault aborts the step, restores all bodies to the pre-step state, publishes nothing, records `numerical_fault` (body id and name, quantity, stage, step), reports once, refuses further steps until `clear_numerical_fault()`.
+- `Tests/test_rotational_stability.gd`: 12 tests (A long-duration spinner, discrimination vs the old scheme, dt scaling; B zero/tiny/symmetric/asymmetric/torque cases and solver invariants; C containment). Documentation: `PHYSICS_CONVENTIONS.md`, `ARCHITECTURE.md` (D16, D17), `TESTING.md`, `PROJECT_STATE.md`, this file. `PHASE_PLAN.md` and `AGENTS.md` unchanged. No constraint solver, joint, split-impulse, contact, scene or existing test change.
 
-## 5. Unresolved / notes
-- Frozen-Jacobian dissipation, cold-started split impulses and the other limitations are unchanged (`PROJECT_STATE.md`).
+## 5. Verification (environment: Godot 4.7.stable.official.5b4e0cb0f, Linux 6.18 x86_64, headless, 1 core)
+- VERIFIED: baseline suite before changes 192 passed, 0 failed (exit 0); after: `godot --headless --path . --script res://Tests/run_tests.gd` → 204 passed, 0 failed, 5054 checks, exit 0.
+- VERIFIED: regression sensitivity: replacing the midpoint increment by the explicit one fails 5 new tests (a1, a3, b3, b4, b6). Containment tests were not mutation-tested.
+- VERIFIED: old vs new, identical conditions (`PROJECT_STATE.md`): old fails at 85.658 s with `|L|` ×4.0 and `T` ×16 at 80 s; new, 150 s: `|ΔL|/L0` 2.5e-6, `|ΔT|/T0` 4.6e-6, `|ω|` ∈ [6.005, 7.003], 25 tumbling flips/120 s, `L`-direction error ≤ 0.0157 rad; cost ≈ +8 µs per asymmetric body per step.
+- VERIFIED: fresh import exit 0 (no error/warning lines); both scenes 240 frames headless exit 0; inspection scene 150 simulated seconds (`--fixed-fps 60 --quit-after 9000`) exit 0 with no error lines (old code: errors reproduced).
+- **Not done / UNVERIFIED:** graphical inspection (no display here): that the spinner visibly tumbles and that no debugger errors appear in an interactive run is inferred from the invariants and the headless run only; headless runs are not visual verification. PR #7's web state. Mutation tests of the containment code. Performance on other machines.
 
-## 6. Next action
-Stop and wait for the user's review of M1.3.2 and acceptance of M1.3. M1.4 and M2 are not authorized.
+## 6. Unresolved / notes
+- The `L` direction is first-order accurate (bounded 0.0157 rad at 120 Hz); an exact scheme needs the free-rotor step in the position phase after the constraint solve (deferred, `ARCHITECTURE.md`). Constraint-coupled fast rotation still has the frozen-Jacobian limitation (`PROJECT_STATE.md`).
+- Stale wording left in untouched tests: comments in `Tests/test_contact.gd` and `Tests/test_hinge_joint.gd` still say "explicit gyroscopic term" (their assertions are unaffected).
+- Prototype scripts (float64 Python, diagnostic harness) are not committed.
+
+## 7. Next action
+Stop and wait for the user's review. Do not begin M2 or merge. To apply: see `AGENTS.md` §7.

@@ -4,13 +4,18 @@ extends RefCounted
 ## Step pipeline (differences from the conceptual pipeline are noted in ARCHITECTURE.md):
 ##  1. capture previous state (for render interpolation)
 ##  2. accumulate gravity into force accumulators
-##  3. integrate velocities (forces, torques, gyroscopic term)
+##  3. integrate velocities (forces, torques, implicit-midpoint gyroscopic update); validate the result (see below)
 ##  4. zero the split (pseudo) velocities
 ##  5. prepare + solve constraints: physical velocity pass, then split-impulse pass (positional correction, M1.3)
 ##  6. integrate positions / orientations with physical + split velocities
 ##  7. zero the split velocities again (they never persist; physical velocities are untouched by split impulses)
 ##  8. publish new state
 ##  9. clear force/torque accumulators
+## Failure containment: the velocities are checked after step 3 (before the solver could spread a bad value to other bodies)
+## and the whole state after step 6 (before step 8 publishes it). A non-finite value, a non-unit orientation or a failed
+## gyroscopic solve aborts the step: every body is restored to its state at the start of the step, nothing is published, the
+## fault is recorded in `numerical_fault` / `last_error` with the body id and name, reported once with push_error, and all
+## further steps are refused until clear_numerical_fault(). The renderer therefore never receives a non-finite transform.
 
 const SimConfig = preload("res://Simulation/Core/sim_config.gd")
 const SimRigidBody = preload("res://Simulation/Core/sim_rigid_body.gd")
@@ -31,6 +36,11 @@ var dropped_time: float = 0.0
 var last_error: String = ""
 ## Number of advance()/step() calls refused because of invalid configuration or bodies.
 var rejected_step_count: int = 0
+
+## Description of a numerical failure detected during a step, "" when none. While set, preflight() refuses every step.
+var numerical_fault: String = ""
+## Tolerance of | |q| - 1 | for a stored orientation (float32 unit quaternion rounding is ~6e-8; the setter normalizes every update).
+const ORIENTATION_NORM_TOLERANCE: float = 1.0e-5
 
 var _reported_error: String = ""
 var _next_body_id: int = 0
@@ -107,7 +117,9 @@ func _membership_error(constraint: SimConstraint) -> String:
 ## SimConfig is a mutable Resource, so this runs at the start of every advance() and step().
 func preflight() -> bool:
 	var message: String = ""
-	if config == null:
+	if numerical_fault != "":
+		message = "numerical fault: " + numerical_fault
+	elif config == null:
 		message = "config is null"
 	else:
 		var errors: PackedStringArray = config.validate()
@@ -197,17 +209,84 @@ func _step_unchecked() -> void:
 		if not body.is_static():
 			body.apply_force(config.gravity * body.mass)
 	for body in bodies:
-		SimIntegrator.integrate_velocities(body, dt)
+		if not SimIntegrator.integrate_velocities(body, dt):
+			_abort_step("body %d (%s): implicit gyroscopic solve failed (non-finite input or no convergence, |w| dt = %s)" % [body.id, body.body_name, body.angular_velocity.length() * dt])
+			return
 		body.clear_split_velocity()
+	var fault: String = _invalid_state_description(false)
+	if fault != "":
+		_abort_step(fault + " after velocity integration (before the constraint solve)")
+		return
 	_solver.solve(constraints, dt, config)
+	fault = _invalid_state_description(false)
+	if fault != "":
+		_abort_step(fault + " after the constraint solve")
+		return
 	for body in bodies:
 		SimIntegrator.integrate_positions(body, dt)
 		body.clear_split_velocity()
+	fault = _invalid_state_description(true)
+	if fault != "":
+		_abort_step(fault + " after position integration")
+		return
 	for body in bodies:
 		body.published_state.capture_from(body)
 		body.clear_accumulators()
 	step_count += 1
 	simulation_time += dt
+
+
+## "" if every dynamic body has finite velocities (and, when `check_pose`, finite position, orientation of unit length and
+## finite world inertia); otherwise a description naming the first offending body and quantity.
+func _invalid_state_description(check_pose: bool) -> String:
+	for body in bodies:
+		if body.is_static():
+			continue
+		var what: String = ""
+		if not _vec_finite(body.linear_velocity):
+			what = "linear velocity %s" % body.linear_velocity
+		elif not _vec_finite(body.angular_velocity):
+			what = "angular velocity %s" % body.angular_velocity
+		elif not _vec_finite(body.split_linear_velocity) or not _vec_finite(body.split_angular_velocity):
+			what = "split velocity"
+		elif check_pose:
+			var q: Quaternion = body.orientation
+			if not _vec_finite(body.position):
+				what = "position %s" % body.position
+			elif not (is_finite(q.x) and is_finite(q.y) and is_finite(q.z) and is_finite(q.w)):
+				what = "orientation %s" % q
+			elif absf(q.length() - 1.0) > ORIENTATION_NORM_TOLERANCE:
+				what = "orientation not normalized (|q| = %s)" % q.length()
+			elif not (_vec_finite(body.inertia_world.x) and _vec_finite(body.inertia_world.y) and _vec_finite(body.inertia_world.z)):
+				what = "world inertia"
+		if what != "":
+			return "body %d (%s): non-finite or invalid %s" % [body.id, body.body_name, what]
+	return ""
+
+
+static func _vec_finite(v: Vector3) -> bool:
+	return is_finite(v.x) and is_finite(v.y) and is_finite(v.z)
+
+
+## Aborts the current step: restores every body to its start-of-step state, discards forces and split velocities, publishes
+## nothing, does not advance time, records the fault and reports it once.
+func _abort_step(message: String) -> void:
+	for body in bodies:
+		body.position = body.previous_state.position
+		body.orientation = body.previous_state.orientation
+		body.linear_velocity = body.previous_state.linear_velocity
+		body.angular_velocity = body.previous_state.angular_velocity
+		body.clear_split_velocity()
+		body.clear_accumulators()
+	numerical_fault = "%s (step %d, t = %s s). The step was aborted and the world restored to the state before it; steps are refused until clear_numerical_fault()." % [message, step_count + 1, simulation_time]
+	last_error = "numerical fault: " + numerical_fault
+	_reported_error = last_error
+	push_error("SimWorld: numerical fault: %s" % numerical_fault)
+
+
+## Clears a recorded numerical fault so stepping may resume (the caller is responsible for having fixed the cause).
+func clear_numerical_fault() -> void:
+	numerical_fault = ""
 
 
 # --- Diagnostics (read-only) ---

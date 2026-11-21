@@ -18,8 +18,8 @@ only through constraints. Godot nodes only visualize published state. The core i
 | `Simulation/Core/sim_mass_properties.gd` | Mass, inverse mass, full 3×3 local inertia + inverse, world transforms, box/sphere helpers; `validate_inertia()`, `valid`/`error_message` |
 | `Simulation/Core/sim_body_state.gd` | Kinematic snapshot + interpolation (render contract) |
 | `Simulation/Core/sim_rigid_body.gd` | Body state (COM pose, physical velocities, solver-scratch split velocities, accumulators), force/torque/impulse API; `set_mass_properties` rejects invalid input (returns bool) |
-| `Simulation/Core/sim_integrator.gd` | Semi-implicit Euler, gyroscopic term, quaternion exponential update; positions advance with physical + split velocity |
-| `Simulation/Core/sim_world.gd` | Body and constraint registry, accumulator-driven fixed stepping, step pipeline (zeroes the split velocities around the solve), diagnostics, `preflight()` |
+| `Simulation/Core/sim_integrator.gd` | Semi-implicit Euler, implicit-midpoint gyroscopic update (`solve_free_rotation`, Newton in float64; returns false when it fails), quaternion exponential update; positions advance with physical + split velocity |
+| `Simulation/Core/sim_world.gd` | Body and constraint registry, accumulator-driven fixed stepping, step pipeline (zeroes the split velocities around the solve), non-finite/invalid-state detection with step abort and rollback (`numerical_fault`), diagnostics, `preflight()` |
 | `Simulation/Solver/constraint_row.gd` | Scalar row: Jacobian, bias, softness, effective mass, accumulated impulse, [min,max] limits, warm start, PGS update; split channel (split bias, split bounds, split accumulated impulse, `solve_split()`) |
 | `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `solve_iteration()` and `solve_split_iteration()` hooks (default: every row in order); `validate()`/`is_valid()` (default valid) |
 | `Simulation/Solver/ball_joint_constraint.gd` | Ball joint: 3 rows (physical `Cdot = 0`, split bias for the anchor error), anchor queries |
@@ -42,15 +42,16 @@ constraint owns its rows (and their warm-start impulses). Only `SimWorld.step()`
 bodies only through their velocities. External code may apply forces/impulses between steps. Render code reads `previous_state` / `published_state` only.
 
 ### Execution pipeline (`SimWorld._step_unchecked`, after `preflight`)
-capture previous state → add gravity force (m·g) → integrate velocities (F/m, gyroscopic α) → zero split velocities → constraint prepare → **physical PGS pass** → **split-impulse PGS pass** →
-integrate positions (x += (v + v_s) dt, q = exp((ω + ω_s) dt/2) q) → zero split velocities → publish state → clear accumulators.
+capture previous state → add gravity force (m·g) → integrate velocities (F/m, torque, implicit gyroscopic update) → **state check** → zero split velocities → constraint prepare → **physical PGS pass** → **state check** → **split-impulse PGS pass** →
+integrate positions (x += (v + v_s) dt, q = exp((ω + ω_s) dt/2) q) → zero split velocities → **state check** → publish state → clear accumulators.
 Stabilization is the split pass: positional error is corrected through temporary split velocities that move the pose and are never stored as physical velocity (decisions D13–D15).
 The physical pass never reads split state and the split pass never reads or writes physical velocities or impulses (it reads only poses and inertia through the shared Jacobians), so the ordering only fixes determinism. Friction, motor and speculative biases live entirely in the physical pass; `SimWorld` and `ConstraintSolver` contain no joint- or contact-specific stabilization logic.
 
 ### Integration method
 Semi-implicit Euler (velocities first, positions from the new physical velocities plus the split velocities of the step). Rotation uses the exact exponential map of the new world-frame ω applied as a
-pre-multiplied increment, then normalizes. The gyroscopic term is explicit (`α = I_w⁻¹ (τ − ω × I_w ω)`): first-order accurate, does not conserve
-energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve is a deferred option.
+pre-multiplied increment, then normalizes. The torque is a first-order kick; the gyroscopic part is an implicit midpoint step of Euler's equations in the body frame,
+which conserves `|L|` and the rotational kinetic energy of a torque-free body exactly and therefore bounds `|ω|` for any dt (equations, properties and limits:
+`PHYSICS_CONVENTIONS.md`, "Rotational dynamics"; decision D16). The world-frame direction of `L` is only first-order accurate.
 
 ## Validation and failure behavior
 - Rules live in two places only: `SimConfig.validate()` (parameters) and `SimMassProperties.validate_inertia()` plus the constructor (mass/inertia);
@@ -62,6 +63,14 @@ energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve i
 - `SimWorld.add_body()` returns null for invalid mass properties; `SimWorld.add_constraint()` returns null for a null constraint, a constraint with a null body or a body that is not a registered member of this world, or invalid constraint data.
   `interpolation_alpha()` returns 0 for an invalid timestep. `step()` returns bool; `SimRigidBody.set_mass_properties()` returns bool.
 - `BallJointConstraint` inherits the always-valid default. `HingeJointConstraint` and `ContactConstraint` validate their own data in `validate()` (nothing is duplicated in `SimWorld`), so invalid contact data is refused both by `add_constraint()` and by `preflight()` after later mutation.
+
+### Numerical failure containment (D17)
+`SimWorld` checks the state at three points of every step: after the velocity integration (non-finite linear/angular velocity, or a failed gyroscopic solve), after the constraint
+solve, and after the position integration (non-finite position, orientation, world inertia, or a non-unit orientation beyond 1e-5) — in this order so that a bad value never enters
+the solver and never reaches `published_state`. On the first violation the step is **aborted**: every body is restored to the state captured at the start of the step (`previous_state`),
+forces and split velocities are discarded, nothing is published, time and `step_count` do not advance, `numerical_fault` / `last_error` record the body id, name, quantity,
+stage and step, and `push_error` fires once. While `numerical_fault` is set `preflight()` refuses all steps (`step()` returns false, `advance()` returns 0) until
+`clear_numerical_fault()`. There is no clamping or repair of velocities; the check only detects.
 
 ## Solver design
 - Rows are scalar and solved sequentially (Gauss-Seidel); a ball joint is three rows along world axes, so its 3×3 block is not solved simultaneously.
@@ -93,8 +102,12 @@ energy/momentum exactly for fast asymmetric spin. An implicit gyroscopic solve i
 - D14: split velocities are scratch fields on `SimRigidBody` (so rows reach them like physical velocity), but are never part of physical state: temporary scratch quantities, zeroed before the solver and after the position integration, never published. *Direct isolation:* they are not included in the physical velocity, in the momentum or energy diagnostics, or in the motor, friction and contact-velocity calculations, which read the physical `v, w` only. They are not warm started (the accumulated split impulse is reset in `prepare`), as required for a correction that must not persist. *Indirect pose effects:* they are integrated into the pose, so a split angular correction can change a body's orientation. For an anisotropic body the new orientation changes the world-space inertia, so diagnostics calculated from the corrected pose and world inertia, such as spin angular momentum and rotational kinetic energy, can change indirectly although the physical angular velocity is unchanged. This is not a use of split velocity by the diagnostics; the physics is in `PHYSICS_CONVENTIONS.md` ("Stabilization: split impulses", orientation-dependent quantities).
 - D15: the only stabilization parameter stays `SimConfig.baumgarte_factor` (beta); no new parameter, no hidden damping. Positional error uses `split_bias = (beta/dt) C`, the physical bias of the same row is 0 (joints) or the speculative `C/dt` (non-violated contact gap and hinge limit). The split pass is solved after the whole physical pass because the two do not interact.
 
+- D16: the gyroscopic update is the implicit midpoint rule in the body frame (not the explicit term). Chosen because the explicit term has a one-signed second-order error that raises `T` and `|L|` every step and diverged for the inspection-scene spinner; the midpoint rule conserves exactly the two invariants that bound `|ω|`, adds no damping, needs no tuning parameter, and changes only `integrate_velocities` (torque path, orientation update, solver and split impulses untouched; bodies that do not change `L_b` are bit-identical to before).
+- D17: numerical faults abort the step and roll back to the start-of-step state instead of clamping or repairing. Visible failure over hidden correction (D6); rollback keeps the world finite for diagnosis and keeps the renderer from ever receiving a non-finite transform.
 
 ### Rejected / deferred options (with reasons)
+- Explicit gyroscopic term (previous implementation): unconditionally energy- and momentum-increasing, unstable over long runs (`PHYSICS_CONVENTIONS.md`). Single-step linearized implicit Euler gyroscopic solve: stable but dissipative, would damp intermediate-axis tumbling. Moving the free-rotor step into the position phase (exact `L` direction): larger change to the step structure; deferred.
+- Velocity clamping or `|ω|` caps, silencing the Godot error: rejected (hide the failure, no physical basis).
 - 3×3 block solve: rejected for now (specification asks for scalar rows); remains an option for the known convergence limits (`PROJECT_STATE.md`).
 - Split impulses via a separate position-level (nonlinear Gauss-Seidel) pass, a pose teleport, or a warm-started split impulse: rejected for M1.3. The first changes the row/Jacobian model and risks hidden corrections; a teleport is forbidden (`AGENTS.md` §4); a warm-started split impulse would carry a correction velocity across steps. Interleaving the split row with the physical row (solving both in one iteration) was not needed because the passes do not interact.
 - Contact friction as two independently clamped scalar rows (square/pyramid region): rejected, anisotropic (allows `√2·mu·lambda_n` on diagonals) and dependent on the basis; and as radial Euclidean scaling of the block update: rejected, loses maximum dissipation for anisotropic `K`. Contact normal frame in world space only: rejected, a normal stored in body A's frame follows A's orientation (anchors still need caller refresh).
