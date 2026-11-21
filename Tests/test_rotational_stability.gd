@@ -278,3 +278,88 @@ func test_c2_non_finite_position_after_integration_is_not_published() -> void:
 	check(w.step_count == steps_before, "aborted step not counted")
 	check(b.position == Vector3(3.4e38, 0, 0) and b.linear_velocity == Vector3(3.0e38, 0, 0), "body restored to its pre-step state")
 	check(b.published_state.position == pub and b.published_state.position.is_finite(), "last valid state remains published")
+
+
+# --- Static bodies: pose is validated before publication; dynamic-only velocity checks do not apply ---
+
+## World with a static ground at `ground_pos` and a free ball; returns the ground. The pose is corrupted by the caller.
+func _static_world() -> Dictionary:
+	var w: SimWorld = make_world(Vector3(0, -9.81, 0))
+	var ground: SimRigidBody = w.add_body(make_static(Vector3(1, 2, 3)))
+	ground.body_name = "ground"
+	var ball: SimRigidBody = w.add_body(make_sphere(1.0, 0.5, Vector3(0, 5, 0)))
+	run_steps(w, 3)
+	return {"world": w, "ground": ground, "ball": ball}
+
+
+func _check_static_fault_contained(w: SimWorld, ground: SimRigidBody, ball: SimRigidBody, quantity: String, label: String) -> void:
+	var steps_before: int = w.step_count
+	var time_before: float = w.simulation_time
+	var pub_ground: SimBodyState = SimBodyState.new()
+	pub_ground.copy_from(ground.published_state)
+	var pub_ball: Vector3 = ball.published_state.position
+	var ok: bool = w.step()
+	check(not ok, "%s: step() reports the aborted step as failed" % label)
+	check(w.numerical_fault.contains("body %d" % ground.id) and w.numerical_fault.contains("ground") and w.numerical_fault.contains(quantity), "%s: fault names the static body and quantity: %s" % [label, w.numerical_fault])
+	check(w.step_count == steps_before and w.simulation_time == time_before, "%s: aborted step is not counted and time does not advance" % label)
+	check(ground.published_state.position == pub_ground.position and ground.published_state.orientation == pub_ground.orientation, "%s: invalid static pose was not published" % label)
+	check(ground.published_state.position.is_finite() and is_finite(ground.published_state.orientation.w), "%s: last valid static state remains published" % label)
+	check(ball.published_state.position == pub_ball, "%s: no state of the other body was published" % label)
+	check(not w.step() and w.last_error.contains("numerical fault"), "%s: further steps are refused (existing fault mechanism)" % label)
+
+
+func test_c3_static_body_non_finite_position_is_contained() -> void:
+	var s: Dictionary = _static_world()
+	var ground: SimRigidBody = s["ground"]
+	ground.position = Vector3(NAN, 2, 3)
+	_check_static_fault_contained(s["world"], ground, s["ball"], "position", "NaN position")
+	ground.position = Vector3(1, INF, 3)
+	s["world"].clear_numerical_fault()
+	_check_static_fault_contained(s["world"], ground, s["ball"], "position", "inf position")
+	ground.position = Vector3(1, 2, 3)
+	s["world"].clear_numerical_fault()
+	check(s["world"].step() and s["world"].numerical_fault == "", "stepping resumes once the static pose is valid again")
+
+
+func test_c4_static_body_invalid_orientation_is_contained() -> void:
+	var s: Dictionary = _static_world()
+	var ground: SimRigidBody = s["ground"]
+	# The orientation setter normalizes, so a NaN component stays NaN and a zero quaternion becomes non-finite (0/0).
+	ground.orientation = Quaternion(NAN, 0, 0, 1)
+	_check_static_fault_contained(s["world"], ground, s["ball"], "orientation", "NaN orientation")
+	ground.orientation = Quaternion(0, 0, 0, 0)
+	s["world"].clear_numerical_fault()
+	_check_static_fault_contained(s["world"], ground, s["ball"], "orientation", "degenerate (zero) orientation")
+	ground.orientation = Quaternion.IDENTITY
+	s["world"].clear_numerical_fault()
+	check(s["world"].step() and s["world"].numerical_fault == "", "stepping resumes once the static orientation is valid again")
+
+
+func test_c5_valid_static_body_is_not_faulted_and_velocity_checks_stay_exempt() -> void:
+	var s: Dictionary = _static_world()
+	var w: SimWorld = s["world"]
+	var ground: SimRigidBody = s["ground"]
+	ground.orientation = Quaternion(Vector3.UP, 0.7)
+	check(w.numerical_fault == "" and w.step(), "valid, rotated static body steps normally")
+	# Dynamic-only velocity checks do not apply to a static body: its (unused) velocity fields never cause a fault.
+	ground.linear_velocity = Vector3(NAN, 0, 0)
+	ground.angular_velocity = Vector3(INF, 0, 0)
+	check(w.step() and w.numerical_fault == "", "non-finite static velocity fields do not raise a numerical fault")
+	check(ground.position == Vector3(1, 2, 3), "static body does not move")
+	ground.linear_velocity = Vector3.ZERO
+	ground.angular_velocity = Vector3.ZERO
+	var steps: int = w.step_count
+	run_steps(w, 10)
+	check(w.step_count == steps + 10 and w.numerical_fault == "", "stepping continues normally")
+
+
+func test_c6_dynamic_body_validation_is_unchanged_next_to_a_static_body() -> void:
+	var s: Dictionary = _static_world()
+	var w: SimWorld = s["world"]
+	var ball: SimRigidBody = s["ball"]
+	ball.linear_velocity = Vector3(NAN, 0, 0)
+	check(not w.step() and w.numerical_fault.contains("body %d" % ball.id) and w.numerical_fault.contains("linear velocity"), "dynamic non-finite velocity still detected: %s" % w.numerical_fault)
+	ball.linear_velocity = Vector3.ZERO
+	w.clear_numerical_fault()
+	ball.position = Vector3(NAN, 0, 0)
+	check(not w.step() and w.numerical_fault.contains("body %d" % ball.id) and w.numerical_fault.contains("position"), "dynamic non-finite position still detected: %s" % w.numerical_fault)

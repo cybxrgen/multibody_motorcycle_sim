@@ -247,20 +247,21 @@ func _step_unchecked() -> bool:
 	return true
 
 
-## "" if every dynamic body has finite velocities (and, when `check_pose`, finite position, orientation of unit length and
-## finite world inertia); otherwise a description naming the first offending body and quantity.
+## "" if every body is valid; otherwise a description naming the first offending body and quantity. Dynamic bodies must have
+## finite velocities. When `check_pose`, every body, static ones included (their pose is published like any other), must
+## have a finite position and a finite orientation of unit length; dynamic bodies must also have a finite world inertia.
+## Static bodies are exempt from the velocity checks only.
 func _invalid_state_description(check_pose: bool) -> String:
 	for body in bodies:
-		if body.is_static():
-			continue
 		var what: String = ""
-		if not _vec_finite(body.linear_velocity):
-			what = "linear velocity %s" % body.linear_velocity
-		elif not _vec_finite(body.angular_velocity):
-			what = "angular velocity %s" % body.angular_velocity
-		elif not _vec_finite(body.split_linear_velocity) or not _vec_finite(body.split_angular_velocity):
-			what = "split velocity"
-		elif check_pose:
+		if not body.is_static():
+			if not _vec_finite(body.linear_velocity):
+				what = "linear velocity %s" % body.linear_velocity
+			elif not _vec_finite(body.angular_velocity):
+				what = "angular velocity %s" % body.angular_velocity
+			elif not _vec_finite(body.split_linear_velocity) or not _vec_finite(body.split_angular_velocity):
+				what = "split velocity"
+		if what == "" and check_pose:
 			var q: Quaternion = body.orientation
 			if not _vec_finite(body.position):
 				what = "position %s" % body.position
@@ -268,7 +269,7 @@ func _invalid_state_description(check_pose: bool) -> String:
 				what = "orientation %s" % q
 			elif absf(q.length() - 1.0) > ORIENTATION_NORM_TOLERANCE:
 				what = "orientation not normalized (|q| = %s)" % q.length()
-			elif not (_vec_finite(body.inertia_world.x) and _vec_finite(body.inertia_world.y) and _vec_finite(body.inertia_world.z)):
+			elif not body.is_static() and not (_vec_finite(body.inertia_world.x) and _vec_finite(body.inertia_world.y) and _vec_finite(body.inertia_world.z)):
 				what = "world inertia"
 		if what != "":
 			return "body %d (%s): non-finite or invalid %s" % [body.id, body.body_name, what]
