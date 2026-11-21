@@ -21,7 +21,7 @@ only through constraints. Godot nodes only visualize published state. The core i
 | `Simulation/Core/sim_integrator.gd` | Semi-implicit Euler, implicit-midpoint gyroscopic update (`solve_free_rotation`, Newton in float64; returns false when it fails), quaternion exponential update; positions advance with physical + split velocity |
 | `Simulation/Core/sim_world.gd` | Body and constraint registry, accumulator-driven fixed stepping, step pipeline (zeroes the split velocities around the solve), non-finite/invalid-state detection with step abort and rollback (`numerical_fault`), diagnostics, `preflight()` |
 | `Simulation/Solver/constraint_row.gd` | Scalar row: Jacobian, bias, softness, effective mass, accumulated impulse, [min,max] limits, warm start, PGS update; split channel (split bias, split bounds, split accumulated impulse, `solve_split()`) |
-| `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `solve_iteration()` and `solve_split_iteration()` hooks (default: every row in order); `validate()`/`is_valid()` (default valid) |
+| `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `solve_iteration()` and `solve_split_iteration()` hooks (default: every row in order); `reset_warm_start()` (invalidates carried impulses after an aborted step; override if state lives outside the rows); `validate()`/`is_valid()` (default valid) |
 | `Simulation/Solver/ball_joint_constraint.gd` | Ball joint: 3 rows (physical `Cdot = 0`, split bias for the anchor error), anchor queries |
 | `Simulation/Solver/hinge_joint_constraint.gd` | Hinge: 8 rows (3 anchor, 2 axis alignment, motor, lower limit, upper limit), continuous angle, torque→impulse cap; extends `SimConstraint`, uses `ConstraintRow` unchanged, solved by the unchanged `ConstraintSolver` |
 | `Simulation/Solver/contact_constraint.gd` | Generic one-point contact: unilateral normal row (speculative physical bias; penetration removed through its split channel) + isotropic Coulomb friction (two tangent rows solved as one 2×2 block and projected onto a disk); extends `SimConstraint`, reuses `ConstraintRow`, validates its own data |
@@ -69,8 +69,20 @@ which conserves `|L|` and the rotational kinetic energy of a torque-free body ex
 solve, and after the position integration (non-finite position, orientation, world inertia, or a non-unit orientation beyond 1e-5) — in this order so that a bad value never enters
 the solver and never reaches `published_state`. On the first violation the step is **aborted**: every body is restored to the state captured at the start of the step (`previous_state`),
 forces and split velocities are discarded, nothing is published, time and `step_count` do not advance, `numerical_fault` / `last_error` record the body id, name, quantity,
-stage and step, and `push_error` fires once. While `numerical_fault` is set `preflight()` refuses all steps (`step()` returns false, `advance()` returns 0) until
-`clear_numerical_fault()`. There is no clamping or repair of velocities; the check only detects.
+stage and step, and `push_error` fires once. The internal step reports success explicitly: `step()` returns true only for a completed step and false both when preflight refuses
+it (counted in `rejected_step_count`) and when it was aborted (not a rejection). While `numerical_fault` is set `preflight()` refuses all steps (`step()` returns false, `advance()` returns 0)
+until `clear_numerical_fault()`. There is no clamping or repair of velocities; the check only detects.
+
+`advance()` policy after a fault: the first aborted step ends the call immediately; `advance()` returns only the steps that completed. The aborted step is not counted and its `dt` is not
+subtracted, so the accumulator keeps the aborted step's time and all unattempted time (including that call's frame time); the backlog guard does not run, so no time is dropped. Later calls
+are refused by `preflight()` (the refused frame time is not accumulated), so a failed step is never retried automatically; after `clear_numerical_fault()` the preserved time is consumed
+normally (still subject to `max_steps_per_frame`).
+
+Constraint solver state: the solver rewrites the carried warm-start impulses (row `accumulated_impulse`, `ContactConstraint`'s world-space friction impulse) before a fault can be detected
+after the solve, possibly with non-finite values. An abort therefore **invalidates** them: `SimWorld` calls `SimConstraint.reset_warm_start()` on every constraint (rows via
+`ConstraintRow.reset_impulses()`), so the first step after `clear_numerical_fault()` starts from a cold, consistent solver state. Snapshot-and-restore was rejected: it would add a copy per row
+to every normal step to preserve warm-start values of a world that, after a fault, has to be inspected and repaired by the caller anyway. The hinge angle tracker needs no handling:
+the solver only samples the unchanged start-of-step poses, which equal the restored poses.
 
 ## Solver design
 - Rows are scalar and solved sequentially (Gauss-Seidel); a ball joint is three rows along world axes, so its 3×3 block is not solved simultaneously.

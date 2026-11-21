@@ -66,6 +66,13 @@ func prepare(min_denominator: float) -> void:
 	split_accumulated_impulse = 0.0  # split impulses are never carried over between steps
 
 
+## Discards every carried impulse of this row (physical warm-start state and split impulse). Used after an aborted step, when
+## the carried values may be partially updated or non-finite; the next prepare()/warm_start() then starts from zero.
+func reset_impulses() -> void:
+	accumulated_impulse = 0.0
+	split_accumulated_impulse = 0.0
+
+
 ## Applies carried-over impulse (warm start) or resets it.
 func warm_start(use_warm_start: bool, factor: float) -> void:
 	if use_warm_start:

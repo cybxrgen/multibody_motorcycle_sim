@@ -250,7 +250,7 @@ func test_c1_non_finite_velocity_is_contained() -> void:
 	var steps_before: int = w.step_count
 	bad.angular_velocity = Vector3(INF, 0, NAN)
 	var ok: bool = w.step()
-	check(ok, "step() ran (and aborted internally)")
+	check(not ok, "step() reports the aborted step as failed")
 	check(w.numerical_fault != "" and w.numerical_fault.contains("body %d" % bad.id) and w.numerical_fault.contains("bad_spinner"), "fault names the body: %s" % w.numerical_fault)
 	check(w.step_count == steps_before, "aborted step is not counted")
 	check(good.position == good_pos and good.orientation == good_rot and good.linear_velocity == good_lv and good.angular_velocity == good_av, "unrelated (jointed) body untouched, not contaminated")

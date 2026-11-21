@@ -160,8 +160,14 @@ static func step_tolerance(dt: float) -> float:
 	return minf(1.0e-12, dt * 1.0e-9)
 
 
-## Feed real frame time; runs zero or more fixed steps. Returns the number of steps executed.
+## Feed real frame time; runs zero or more fixed steps. Returns the number of steps that COMPLETED successfully.
 ## If preflight() fails, nothing changes (accumulator, state, time) and 0 is returned.
+## Accumulator policy on a numerical fault: the first step that aborts ends the call immediately. The aborted step is not
+## counted and its dt is NOT subtracted: the accumulator keeps the time of the aborted step and of every step not yet
+## attempted (including this call's frame time, which was added before the loop), and the backlog guard below does not run,
+## so no simulated time is silently discarded. The world is then in the numerical-fault state, in which preflight() refuses
+## every further advance()/step() (counted in rejected_step_count, accumulator untouched, the refused frame time is not
+## accumulated) until clear_numerical_fault(); no failed step is retried automatically.
 func advance(frame_delta: float) -> int:
 	if not preflight():
 		rejected_step_count += 1
@@ -171,7 +177,8 @@ func advance(frame_delta: float) -> int:
 	var tol: float = step_tolerance(dt)
 	var steps: int = 0
 	while accumulator >= dt - tol and steps < config.max_steps_per_frame:
-		_step_unchecked()
+		if not _step_unchecked():
+			return steps
 		accumulator -= dt
 		steps += 1
 	if accumulator >= dt - tol:
@@ -192,16 +199,19 @@ func interpolation_alpha() -> float:
 	return clampf(accumulator / config.fixed_timestep, 0.0, 1.0)
 
 
-## One fixed step. Returns false (and changes nothing) if preflight() fails.
+## One fixed step. Returns true only if the complete step succeeded. Returns false if preflight() refuses the step (nothing
+## changes, counted in rejected_step_count) or if the step was aborted by a numerical fault (rolled back, see _abort_step();
+## the fault is in `numerical_fault`).
 func step() -> bool:
 	if not preflight():
 		rejected_step_count += 1
 		return false
-	_step_unchecked()
-	return true
+	return _step_unchecked()
 
 
-func _step_unchecked() -> void:
+## Runs one fixed step without preflight. Returns true if it completed and was published, false if it was aborted by
+## _abort_step() (every body restored, nothing published, step_count and simulation_time unchanged).
+func _step_unchecked() -> bool:
 	var dt: float = config.fixed_timestep
 	for body in bodies:
 		body.previous_state.capture_from(body)
@@ -211,29 +221,30 @@ func _step_unchecked() -> void:
 	for body in bodies:
 		if not SimIntegrator.integrate_velocities(body, dt):
 			_abort_step("body %d (%s): implicit gyroscopic solve failed (non-finite input or no convergence, |w| dt = %s)" % [body.id, body.body_name, body.angular_velocity.length() * dt])
-			return
+			return false
 		body.clear_split_velocity()
 	var fault: String = _invalid_state_description(false)
 	if fault != "":
 		_abort_step(fault + " after velocity integration (before the constraint solve)")
-		return
+		return false
 	_solver.solve(constraints, dt, config)
 	fault = _invalid_state_description(false)
 	if fault != "":
 		_abort_step(fault + " after the constraint solve")
-		return
+		return false
 	for body in bodies:
 		SimIntegrator.integrate_positions(body, dt)
 		body.clear_split_velocity()
 	fault = _invalid_state_description(true)
 	if fault != "":
 		_abort_step(fault + " after position integration")
-		return
+		return false
 	for body in bodies:
 		body.published_state.capture_from(body)
 		body.clear_accumulators()
 	step_count += 1
 	simulation_time += dt
+	return true
 
 
 ## "" if every dynamic body has finite velocities (and, when `check_pose`, finite position, orientation of unit length and
@@ -270,6 +281,11 @@ static func _vec_finite(v: Vector3) -> bool:
 
 ## Aborts the current step: restores every body to its start-of-step state, discards forces and split velocities, publishes
 ## nothing, does not advance time, records the fault and reports it once.
+## Constraint solver state is invalidated, not restored: the solver may already have rewritten the carried (warm-start)
+## impulses of every constraint, possibly with non-finite values, and the pre-step values are not kept (keeping them would
+## cost a copy per row in every normal step). reset_warm_start() zeroes them, so the first step after
+## clear_numerical_fault() starts from a consistent cold solver state. Pose-derived tracker state (the hinge angle) is not
+## touched by the solver before the bodies move, so it already agrees with the restored poses.
 func _abort_step(message: String) -> void:
 	for body in bodies:
 		body.position = body.previous_state.position
@@ -278,6 +294,8 @@ func _abort_step(message: String) -> void:
 		body.angular_velocity = body.previous_state.angular_velocity
 		body.clear_split_velocity()
 		body.clear_accumulators()
+	for c in constraints:
+		c.reset_warm_start()
 	numerical_fault = "%s (step %d, t = %s s). The step was aborted and the world restored to the state before it; steps are refused until clear_numerical_fault()." % [message, step_count + 1, simulation_time]
 	last_error = "numerical fault: " + numerical_fault
 	_reported_error = last_error
