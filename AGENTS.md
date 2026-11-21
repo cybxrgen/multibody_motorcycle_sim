@@ -18,7 +18,7 @@ archives or decision logs unless a concrete need is justified to the user first.
 | `AGENTS.md` | Permanent agent rules | Workflow, scope, Git, testing, delivery, doc rules, ownership matrix | Current project status |
 | `Documentation/PROJECT_STATE.md` | Canonical current state | What exists, latest verified results, project-wide limitations and debt | Future roadmap, assignment diary |
 | `Documentation/PHASE_PLAN.md` | Current roadmap | Current phase and milestone, remaining work, next-phase objective | Historical milestone archive (Git is the archive) |
-| `Documentation/HANDOFF.md` | Current assignment transfer | What the last assignment did, how it was verified, next action | Permanent project state, full roadmap |
+| `Documentation/HANDOFF.md` | Delivery-time handoff snapshot | What the last assignment did, how it was verified, unresolved issues and next action, **as observed at delivery** | Permanent project state, full roadmap, live Git/GitHub status |
 | `Documentation/ARCHITECTURE.md` | Stable system architecture | Modules, dependencies, data flow, boundaries, design decisions and rationale | Temporary task status |
 | `Documentation/PHYSICS_CONVENTIONS.md` | Physics and math conventions | Units, frames, quaternions, inertia, Jacobians, solver and numerical assumptions | Implementation progress, test results |
 | `Documentation/TESTING.md` | Verification methodology | Suite layout, test-writing rules, commands, verification levels, how to read results | Duplicated test reports |
@@ -29,7 +29,7 @@ archives or decision logs unless a concrete need is justified to the user first.
 |---|---|
 | New implemented capability | `PROJECT_STATE.md` + the relevant technical docs (`ARCHITECTURE.md`, `PHYSICS_CONVENTIONS.md`, `TESTING.md`) |
 | Milestone status change | `PHASE_PLAN.md` |
-| Assignment completed or interrupted | `HANDOFF.md` (replace it; do not append) |
+| Assignment completed or interrupted | `HANDOFF.md` (replace it; do not append) — not required merely because the user later applied or published an earlier delivery |
 | Persistent project limitation discovered or resolved | `PROJECT_STATE.md` |
 | Physics convention changed | `PHYSICS_CONVENTIONS.md` |
 | Architectural decision changed | `ARCHITECTURE.md` |
@@ -47,8 +47,9 @@ Do not touch an unrelated document just to look comprehensive. Record the latest
 5. Remove outdated statements; never append a contradictory correction below an old statement.
 6. Never claim a test, commit, runtime check or visual inspection that was not performed.
 7. Cross-reference instead of duplicating (link the owning document).
-8. Make the final `HANDOFF.md` agree with the actual Git state (`git branch --show-current`, `git log`, `git status`).
-9. Before delivery, read all seven documents together and search for contradictions (phase/milestone declarations, limitations, counts, branch and commit statements).
+8. `HANDOFF.md` is a delivery-time snapshot, not a live status page. Record the Git state you actually inspected at delivery (`git branch --show-current`, `git log`, `git status`) and name the observation context (branch and commit inspected; "at delivery"). Never predict or invent a future remote SHA, and never imply that the observation stays current. Record local commit creation, patch delivery, user application, remote publication, PR creation, review and merge as separate events, and claim only those you observed.
+   Later user actions (applying the patch, publishing, advancing the branch) change the head, SHAs, ahead/behind counts or publication status without making the handoff inaccurate. Do not create a commit solely to refresh such facts.
+9. Before delivery, read all seven documents together and search for contradictions (phase/milestone declarations, limitations, counts, policy). Treat a genuine contradiction in project facts or policy as a defect to resolve; treat Git facts that merely became stale after the handoff's observation time as expected, not as a contradiction.
 10. Documentation must never describe functionality that does not exist. Avoid dates, commit hashes, test counts and branch names outside
     the documents that own them (`PROJECT_STATE.md`, `HANDOFF.md`); a file cannot contain the hash of its own commit.
 
@@ -58,7 +59,7 @@ Record failed or rejected approaches with reasons in the owning technical docume
 ## 2. Mandatory start-of-work routine
 1. Read, in order: this file, `Documentation/HANDOFF.md`, `Documentation/PROJECT_STATE.md`, `Documentation/PHASE_PLAN.md`,
    `Documentation/ARCHITECTURE.md`, `Documentation/PHYSICS_CONVENTIONS.md`, `Documentation/TESTING.md`.
-2. Inspect the real repository: `git status`, `git branch --show-current`, `git log --oneline --decorate -20`.
+2. Inspect the real repository and establish the present Git state from the current checkout and available remotes: `git status`, `git branch --show-current`, `git log --oneline --decorate -20`. Git statements in a handoff are historical observations unless you verify them against the current checkout; if they differ (the user applied a patch, published a branch or advanced the repository), the current Git state takes precedence. That difference is not by itself a documentation defect and does not authorize a handoff-refresh commit. Still investigate substantive technical or project-status contradictions that affect your assignment.
 3. **If the working tree is dirty, stop and report it. Never modify or discard another party's uncommitted work.**
 4. Inspect the code before changing it. Do not trust documentation or a previous agent's claims blindly: `HANDOFF.md` labels
    claims VERIFIED / REPORTED / UNVERIFIED; re-verify what your work depends on (re-run the test suite before changing simulator code, if Godot is available).
@@ -158,13 +159,14 @@ SHA256:            <checksum filename>
 Remote publication status: Awaiting user publication
 Remote review status:       Not yet available
 ```
+These two lines describe the status at the time of that delivery report; they are not a permanent assertion once the user has acted.
 and states explicitly that: the patch was generated and verified locally; the ZIP, manifest and checksum were generated and verified; the agent did not push or merge;
 the user must publish the resulting branch before remote review can take place; the agent has stopped and is awaiting instructions.
 
 ## 8. Handoff requirements
-At the end of every assignment (completed or interrupted) replace `Documentation/HANDOFF.md` with one current handoff that answers:
+At the end of every assignment (completed or interrupted) replace `Documentation/HANDOFF.md` with one delivery-time handoff that answers:
 what was assigned, what was actually accomplished, what was verified and how, what remains unresolved or blocked, and what the next agent should do.
-Use the labels VERIFIED (confirmed by inspection/execution), REPORTED (stated by a previous agent, not re-confirmed), UNVERIFIED (not checked).
+Use the labels VERIFIED (confirmed by inspection/execution), REPORTED (stated by a previous agent, not re-confirmed), UNVERIFIED (not checked). The labels describe the evidence available when the handoff was created; later repository changes need no retrospective edit. Replace the handoff when a new assignment is completed or interrupted, not merely because the user later published the previous one.
 Format and content rules are in `HANDOFF.md`'s own header.
 
 ## 9. Missing, contradictory or unverified information
