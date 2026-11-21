@@ -6,30 +6,25 @@ design → `ARCHITECTURE.md`. Completed phases and past milestones live only in 
 **Update when:** a milestone's status changes. When a phase completes, **replace** this document's content with the next phase's plan.
 A milestone being listed here is **not** authorization to start it: work begins only on an explicit user assignment (`AGENTS.md`).
 
-## Current phase: M1 — Joints and contacts (in progress)
-**Objective:** extend the generic constraint solver (rows, projected Gauss-Seidel, warm start, Baumgarte) with the joint and unilateral
-constraints a vehicle/rider simulation needs, with no motorcycle- or rider-specific logic in the core.
+## Current phase: M2 — Motorcycle (in progress)
+**Objective:** build the motorcycle as independent rigid bodies coupled only through M1 joints and contacts: chassis, steering/fork, swingarm, wheels,
+suspension, tire model and drivetrain. M1 (generic joints, contacts, split-impulse stabilization) is complete and accepted; its history is in Git.
 
-**Phase acceptance criteria** (M1 is complete only when all hold):
-1. M1.1, M1.2 and M1.3 are each implemented, verified by headless tests with physically justified tolerances, documented in their owning documents, delivered, and accepted by the user.
-2. Core and solver remain generic (`AGENTS.md` §4); no built-in Godot physics is used as authority.
-3. Remaining project-wide limitations are recorded in `PROJECT_STATE.md`.
-Per-milestone acceptance criteria are defined by the assignment that authorizes the milestone.
-
-**Current milestone: M1.3 (formally accepted by the user; implemented and merged into `main`).** Git integration and milestone acceptance are separate facts, and both now hold for M1.3. Whether M1 as a whole is complete is the user's decision against the criteria above. M2 is not authorized and starts only on an explicit user assignment.
+**Current milestone: M2.1 — Rigid motorcycle assembly (implemented; awaiting user review and acceptance).** Five independent rigid bodies (chassis,
+steering/fork assembly, swingarm, front wheel, rear wheel) connected by four generic hinges, built by a reusable scene-tree-independent builder
+(`Simulation/Motorcycle/`). What exists and how it was verified: `PROJECT_STATE.md`. This milestone is **not** M2 and does not complete it.
 
 ### Milestones
 | Milestone | Status |
 |---|---|
-| M1.1 Hinge joint with angular limits and velocity motor | Complete (implemented and committed; test results in `PROJECT_STATE.md`) |
-| M1.1.1 Constraint/world body-membership validation | Complete (accepted and merged by the user) |
-| M1.2 Contact (unilateral) constraints with friction | Complete (accepted and merged by the user) |
-| M1.2.1 Handoff documentation correction | Complete (accepted and merged by the user) |
-| M1.3 Split-impulse stabilization (including follow-ups M1.3.1, M1.3.2) | Complete (formally accepted by the user; merged into `main`; verification in `PROJECT_STATE.md`) |
+| M2.1 Rigid motorcycle assembly (5 bodies, 4 free hinges, builder, illustrative prototype parameters, demonstration scene) | Implemented; awaiting user review |
+| Front suspension (telescopic fork travel, spring/damper) | Not started — not authorized |
+| Rear suspension (shock, spring/damper on the swingarm) | Not started — not authorized |
+| Ground contact and tire model (contact patch, slip, traction, rolling resistance) | Not started — not authorized |
+| Drivetrain (engine, clutch, gearbox, final drive) | Not started — not authorized |
 
-## Next phase: M2 — Motorcycle
-**Objective:** build the motorcycle as independent rigid bodies coupled only through M1 joints and contacts: chassis, steering/fork, swingarm, wheels,
-suspension, tire model and drivetrain. Requires M1 complete.
+Remaining M2 work is the four "Not started" rows; their order and scope are the user's decision. A milestone listed here is **not** authorization to start it:
+work begins only on an explicit user assignment (`AGENTS.md`). M2 is complete only when the user accepts it against the objective above.
 
 ## Later phases (outline only; not planned in detail)
 - M3 — Rider: articulated rider bodies, joint limits, muscle actuators, grips/seat/pegs. Needs M1 and M2 interfaces.
