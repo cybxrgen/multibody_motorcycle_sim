@@ -42,8 +42,8 @@ constraint owns its rows (and their warm-start impulses). Only `SimWorld.step()`
 bodies only through their velocities. External code may apply forces/impulses between steps. Render code reads `previous_state` / `published_state` only.
 
 ### Execution pipeline (`SimWorld._step_unchecked`, after `preflight`)
-capture previous state → add gravity force (m·g) → integrate velocities (F/m, torque, implicit gyroscopic update) → **state check** → zero split velocities → constraint prepare → **physical PGS pass** → **state check** → **split-impulse PGS pass** →
-integrate positions (x += (v + v_s) dt, q = exp((ω + ω_s) dt/2) q) → zero split velocities → **state check** → publish state → clear accumulators.
+capture previous state → add gravity force (m·g) → integrate velocities (F/m, torque, implicit gyroscopic update) → **state check** (dynamic velocities; poses of all bodies, static included) → zero split velocities → constraint prepare → **physical PGS pass** → **state check** (velocities) → **split-impulse PGS pass** →
+integrate positions (x += (v + v_s) dt, q = exp((ω + ω_s) dt/2) q) → zero split velocities → **state check** (velocities and poses) → publish state → clear accumulators.
 Stabilization is the split pass: positional error is corrected through temporary split velocities that move the pose and are never stored as physical velocity (decisions D13–D15).
 The physical pass never reads split state and the split pass never reads or writes physical velocities or impulses (it reads only poses and inertia through the shared Jacobians), so the ordering only fixes determinism. Friction, motor and speculative biases live entirely in the physical pass; `SimWorld` and `ConstraintSolver` contain no joint- or contact-specific stabilization logic.
 
@@ -65,13 +65,18 @@ which conserves `|L|` and the rotational kinetic energy of a torque-free body ex
 - `BallJointConstraint` inherits the always-valid default. `HingeJointConstraint` and `ContactConstraint` validate their own data in `validate()` (nothing is duplicated in `SimWorld`), so invalid contact data is refused both by `add_constraint()` and by `preflight()` after later mutation.
 
 ### Numerical failure containment (D17)
-`SimWorld` checks the state at three points of every step: after the velocity integration (non-finite linear/angular velocity, or a failed gyroscopic solve), after the constraint
-solve, and after the position integration (non-finite position, orientation, world inertia, or a non-unit orientation beyond 1e-5) — in this order so that a bad value never enters
-the solver and never reaches `published_state`. On the first violation the step is **aborted**: every body is restored to the state captured at the start of the step (`previous_state`),
+`SimWorld` checks the state at three points of every step: after the velocity integration and before the constraint solve (a failed gyroscopic solve; non-finite linear/angular/split velocity of dynamic bodies;
+non-finite position or a non-finite / non-unit orientation beyond 1e-5 of **every** body, static bodies included, plus a non-finite world inertia of dynamic bodies), after the constraint solve
+(velocities), and after the position integration (velocities and poses again) — in this order so that a bad value never enters the solver and never reaches `published_state`.
+Static bodies are exempt from the velocity and world-inertia checks only: their pose is published and read by constraints like any other. Everything the check rejects is only detected, never repaired. On the first violation the step is **aborted**: every body is restored to the state captured at the start of the step (`previous_state`),
 forces and split velocities are discarded, nothing is published, time and `step_count` do not advance, `numerical_fault` / `last_error` record the body id, name, quantity,
 stage and step, and `push_error` fires once. The internal step reports success explicitly: `step()` returns true only for a completed step and false both when preflight refuses
 it (counted in `rejected_step_count`) and when it was aborted (not a rejection). While `numerical_fault` is set `preflight()` refuses all steps (`step()` returns false, `advance()` returns 0)
-until `clear_numerical_fault()`. There is no clamping or repair of velocities; the check only detects.
+until `clear_numerical_fault()`. There is no clamping or repair of velocities or poses; the check only detects.
+
+Rollback restores the state captured at the start of the *aborted step*, not the last published state. If the caller corrupted a pose before `step()` (for example a static body's position set to NaN), that pose is already in the snapshot,
+so it is detected before the constraint solve, the step aborts, and the rollback restores the same invalid pose. `clear_numerical_fault()` only clears the flag; it does not repair body state, so the next step detects the invalid pose
+again. The caller must restore a valid position/orientation (or remove and recreate the body) and then call `clear_numerical_fault()`. This is deliberate rollback behaviour, not an automatic-recovery guarantee (`PROJECT_STATE.md`, limitations).
 
 `advance()` policy after a fault: the first aborted step ends the call immediately; `advance()` returns only the steps that completed. The aborted step is not counted and its `dt` is not
 subtracted, so the accumulator keeps the aborted step's time and all unattempted time (including that call's frame time); the backlog guard does not run, so no time is dropped. Later calls
