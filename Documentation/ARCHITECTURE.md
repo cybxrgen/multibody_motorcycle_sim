@@ -8,8 +8,7 @@ equations and sign conventions â†’ `PHYSICS_CONVENTIONS.md`; test methodology â†
 Describes only modules that exist; planned systems are not listed here until they are built.
 
 ## Principle
-One authoritative simulation (`SimWorld`) owns all physical state. Motorcycle parts (M2.2: six rigid bodies, four hinges, one prismatic joint) are independent rigid bodies, and rider segments will be, coupled
-only through constraints. Godot nodes only visualize published state. The core is generic: no vehicle or rider special cases.
+One authoritative simulation (`SimWorld`) owns all physical state. Motorcycle parts are independent rigid bodies coupled through generic constraints and explicitly modeled forces. Rider segments will follow the same multibody approach. Godot nodes only visualize published state. The core is generic: no vehicle or rider special cases.
 
 ## Modules
 | Module | Responsibility |
