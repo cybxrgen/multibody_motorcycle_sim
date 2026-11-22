@@ -1,14 +1,18 @@
 extends Node3D
-## M2.1 demonstration: the rigid motorcycle assembly (five rigid bodies, four free hinges) in ZERO gravity, built by
-## MotorcycleBuilder from the ILLUSTRATIVE prototype parameters (not a real motorcycle). It is not riding: there is no ground,
-## no suspension, no tyre and no drive, and the hinges have no limits, so the free parts keep turning and pass through each other.
+## M2.1/M2.2 demonstration: the motorcycle assembly (six rigid bodies, four free hinges, the fork's prismatic joint with a
+## spring-damper and finite travel) in ZERO gravity, built by MotorcycleBuilder from the ILLUSTRATIVE prototype parameters (not a
+## real motorcycle). It is not riding: there is no ground, no rear suspension, no tyre and no drive, and the hinges have no limits,
+## so the free parts keep turning and pass through each other. The front fork is a real telescopic suspension: the upper steering
+## assembly (orange) and the lower fork slider (cyan) are separate bodies; the front wheel (red) hangs on the slider and the slider
+## slides along the raked fork axis against the spring-damper and its travel stops.
 ##
 ## Initial conditions (set once at scenario build, exactly as simulation_test.gd sets its spinner's velocity; nothing is applied
 ## afterwards): for every hinge an equal and opposite pair of angular impulses about its axis, so total momentum is zero and the
-## assembly does not drift: steering, swingarm and both wheels each get a different relative rotation. This script only advances
+## assembly does not drift: steering, swingarm and both wheels each get a different relative rotation. One more equal and opposite
+## pair of impulses along the fork axis (steering assembly vs fork slider) makes the fork travel visibly. This script only advances
 ## the world with the fixed-step accumulator (like simulation_test.gd) and renders PUBLISHED state; it never writes physical state.
 ##
-## Colors: chassis blue-grey, steering/fork orange, swingarm green, front wheel red, rear wheel yellow; wheels carry a contrasting
+## Colors: chassis blue-grey, steering assembly orange, fork slider cyan, swingarm green, front wheel red, rear wheel yellow; wheels carry a contrasting
 ## spoke bar and valve marker so their rotation is visible. Overlay: magenta/cyan crosses are the two anchors of each hinge.
 ## Keys: Space pause/resume, N single step (paused), R reset, L local axes, C COM markers, J anchors, mouse drag orbit, wheel zoom.
 
@@ -74,10 +78,14 @@ func _build_scenario() -> void:
 	for k in 4:
 		joints[k].body_b.apply_angular_impulse(specs[k].axis * kicks[k])
 		joints[k].body_a.apply_angular_impulse(specs[k].axis * -kicks[k])
+	# Fork travel: equal and opposite linear impulses along the fork axis on the slider and the steering assembly (zero net momentum).
+	assembly.fork_slider.apply_impulse(config.fork_travel.axis * -25.0)
+	assembly.steering.apply_impulse(config.fork_travel.axis * 25.0)
 
 	renderer.add_box(assembly.chassis, config.chassis.visual_size, Color(0.45, 0.55, 0.75))
 	renderer.add_box(assembly.steering, config.steering.visual_size, Color(0.95, 0.55, 0.15))
 	renderer.add_box(assembly.swingarm, config.swingarm.visual_size, Color(0.3, 0.75, 0.35))
+	renderer.add_box(assembly.fork_slider, config.fork_slider.visual_size, Color(0.25, 0.8, 0.85))
 	_add_wheel(assembly.front_wheel, config.front_wheel_radius, config.front_wheel_width, Color(0.85, 0.2, 0.2))
 	_add_wheel(assembly.rear_wheel, config.rear_wheel_radius, config.rear_wheel_width, Color(0.9, 0.8, 0.2))
 
@@ -105,8 +113,8 @@ func _process(delta: float) -> void:
 	var alpha: float = world.interpolation_alpha() if not paused else 1.0
 	renderer.render(alpha)
 	debug_overlay.update_overlay(alpha)
-	_label.text = "%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [L] local axes  [C] COM  [J] anchors\nZero gravity, free hinges, illustrative prototype values: not a ride." % [
-		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report()]
+	_label.text = "%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [L] local axes  [C] COM  [J] anchors\nZero gravity, free hinges, illustrative prototype values: not a ride." % [
+		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report()]
 
 
 ## Relative angular velocity about each hinge axis, from PUBLISHED state only (read-only; no constraint or body is touched).
@@ -120,6 +128,23 @@ func _joint_report() -> String:
 		var rate: float = (j.body_b.published_state.angular_velocity - j.body_a.published_state.angular_velocity).dot(axis)
 		text += "  %s %.2f" % [names[k], rate]
 	return text
+
+
+## Fork displacement (m, + = extension, - = compression) and axial velocity (m/s) of the spring seats, computed ONLY from the
+## published (render-side) body states with the same formula as FrontSuspension (read-only; no body, joint or force is touched).
+func _fork_report() -> String:
+	var susp = assembly.front_suspension
+	var a = assembly.steering.published_state
+	var b = assembly.fork_slider.published_state
+	var axis: Vector3 = a.orientation * assembly.fork_joint.local_axis_a
+	var offset_a: Vector3 = a.orientation * susp.local_attachment_a
+	var offset_b: Vector3 = b.orientation * susp.local_attachment_b
+	var separation: Vector3 = (b.position + offset_b) - (a.position + offset_a)
+	var v_a: Vector3 = a.linear_velocity + a.angular_velocity.cross(offset_a)
+	var v_b: Vector3 = b.linear_velocity + b.angular_velocity.cross(offset_b)
+	var displacement: float = separation.dot(axis) - susp.reference_separation
+	var travel: String = "travel %.3f..%.3f m" % [assembly.fork_joint.lower_limit, assembly.fork_joint.upper_limit]
+	return "fork: displacement %+.4f m  axial velocity %+.3f m/s  (%s)" % [displacement, (v_b - v_a).dot(axis), travel]
 
 
 func _unhandled_input(event: InputEvent) -> void:

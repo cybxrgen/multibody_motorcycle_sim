@@ -1,5 +1,5 @@
 extends RefCounted
-## ILLUSTRATIVE TEST-FIXTURE PARAMETERS for the M2.1 rigid motorcycle assembly.
+## ILLUSTRATIVE TEST-FIXTURE PARAMETERS for the motorcycle assembly (M2.1 rigid assembly, M2.2 front telescopic fork).
 ##
 ## These numbers are NOT measured and NOT calibrated: they are plausible, motorcycle-proportioned values chosen so that the
 ## first assembly is a well-conditioned, runnable example (distinct masses, non-trivial inertias, a raked steering axis and a
@@ -10,15 +10,23 @@ extends RefCounted
 ##   * Everything lies in the symmetry plane x = 0. The motorcycle points toward -Z (front wheel at negative z).
 ##   * Steering axis: raked by RAKE from the vertical, leaning rearward toward the top: a = (0, cos RAKE, sin RAKE).
 ##     Positive steering-hinge angle = right-handed about +a = steering to the LEFT (front of the fork toward -X).
+##   * Fork axis (prismatic joint): the steering axis line, directed DOWN the fork (-a), from the steering assembly toward the fork
+##     slider. Positive coordinate = EXTENSION of the fork, negative = compression. The slider moves along the raked axis, not
+##     along world vertical.
 ##   * Swingarm axis +X. Positive angle = right-handed about +X = the rear end of the swingarm moves DOWN.
 ##   * Wheel axles +X. Positive angle = right-handed about +X = the wheel top moves rearward, so rolling FORWARD (toward -Z)
 ##     is a NEGATIVE angle rate about the +X axle axis.
 ## Primitive approximations (full side lengths, uniform density; inertia about the COM in the body frame):
 ##   chassis    solid box 0.30 x 0.55 x 1.00 m (x, y, z)           -> SimMassProperties.box_inertia
-##   steering   solid box 0.60 x 0.70 x 0.16 m in the fork frame   -> box_inertia (local +Y along the steering axis)
+##   steering   solid box 0.60 x 0.30 x 0.16 m in the fork frame   -> box_inertia (local +Y along the steering axis); the steering
+##              stem, triple clamps, handlebar and upper fork tubes (14 kg)
+##   fork slider solid box 0.24 x 0.40 x 0.14 m in the fork frame  -> box_inertia; lower fork legs and axle carrier (8 kg). Together
+##              steering + slider are the 22 kg fork assembly of M2.1
 ##   swingarm   solid box 0.20 x 0.10 x L m (L = pivot-to-axle)    -> box_inertia (local +Z along the swingarm)
 ##   wheels     hollow cylinder, outer radius R, inner radius WHEEL_INNER_FRACTION * R (a rim-and-tyre-like ring), width w
 ##                                                                 -> MotorcycleConfig.wheel_inertia (axle = local X)
+## Front suspension (illustrative, NOT calibrated): spring seats on the fork axis, k = 12 kN/m, c = 400 N s/m, rest displacement
+## 0 (unloaded at the reference pose), travel limits 0.12 m compression / 0.03 m extension from the reference pose.
 
 const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.gd")
 const BodySpec = preload("res://Simulation/Motorcycle/motorcycle_body_spec.gd")
@@ -42,8 +50,13 @@ static func config() -> MotorcycleConfig:
 	var head_point: Vector3 = Vector3(0.0, 0.88, -0.33)  # on the steering axis, at the chassis
 	var fork_length: float = 0.65    # head point to the front axle measured along the steering axis
 	var fork_offset: float = 0.04    # front axle displaced forward from the steering axis, perpendicular to it
-	var fork_com_below_head: float = 0.30   # fork-assembly COM, measured down the axis from the head point
-	var fork_com_offset: float = 0.02       # fork-assembly COM, forward of the axis
+	var steering_com_below_head: float = 0.12  # steering-assembly (upper fork) COM, measured down the axis from the head point
+	var steering_com_offset: float = 0.02      # steering-assembly COM, forward of the axis
+	var slider_com_below_head: float = 0.50    # fork-slider (lower fork) COM, measured down the axis from the head point
+	var slider_com_offset: float = 0.03        # fork-slider COM, forward of the axis
+	var fork_joint_below_head: float = 0.35    # prismatic joint point on the axis, measured down from the head point
+	var seat_upper_below_head: float = 0.20    # spring seat on the steering assembly (on the axis)
+	var seat_lower_below_head: float = 0.42    # spring seat on the fork slider (on the axis)
 	var front_axle_point: Vector3 = head_point - steer_axis * fork_length + fork_forward * fork_offset
 
 	# Swingarm geometry.
@@ -64,9 +77,12 @@ static func config() -> MotorcycleConfig:
 	c.chassis = BodySpec.new("chassis", 120.0, SimMassProperties.box_inertia(120.0, Vector3(0.30, 0.55, 1.00)),
 		Vector3(0.0, 0.62, 0.06), Quaternion.IDENTITY, Vector3(0.30, 0.55, 1.00))
 	# The fork frame is the world frame rotated about +X by the rake: local +Y = steering axis, local -Z = fork_forward.
-	c.steering = BodySpec.new("steering", 22.0, SimMassProperties.box_inertia(22.0, Vector3(0.60, 0.70, 0.16)),
-		head_point - steer_axis * fork_com_below_head + fork_forward * fork_com_offset,
-		Quaternion(Vector3.RIGHT, rake), Vector3(0.60, 0.70, 0.16))
+	c.steering = BodySpec.new("steering", 14.0, SimMassProperties.box_inertia(14.0, Vector3(0.60, 0.30, 0.16)),
+		head_point - steer_axis * steering_com_below_head + fork_forward * steering_com_offset,
+		Quaternion(Vector3.RIGHT, rake), Vector3(0.60, 0.30, 0.16))
+	c.fork_slider = BodySpec.new("fork_slider", 8.0, SimMassProperties.box_inertia(8.0, Vector3(0.24, 0.40, 0.14)),
+		head_point - steer_axis * slider_com_below_head + fork_forward * slider_com_offset,
+		Quaternion(Vector3.RIGHT, rake), Vector3(0.24, 0.40, 0.14))
 	c.swingarm = BodySpec.new("swingarm", 9.0, SimMassProperties.box_inertia(9.0, Vector3(0.20, 0.10, arm_length)),
 		(pivot_point + rear_axle_point) * 0.5, Quaternion(Vector3.RIGHT, tilt), Vector3(0.20, 0.10, arm_length))
 	c.front_wheel = BodySpec.new("front_wheel", 12.0,
@@ -81,4 +97,15 @@ static func config() -> MotorcycleConfig:
 	c.swingarm_pivot = JointSpec.new("swingarm_pivot", pivot_point, Vector3.RIGHT)
 	c.front_axle = JointSpec.new("front_axle", front_axle_point, Vector3.RIGHT)
 	c.rear_axle = JointSpec.new("rear_axle", rear_axle_point, Vector3.RIGHT)
+
+	# Fork: prismatic joint on the steering axis line, directed down the fork (positive = extension), and the spring-damper.
+	c.fork_travel = JointSpec.new("fork_travel", head_point - steer_axis * fork_joint_below_head, -steer_axis)
+	c.front_suspension.upper_attachment = head_point - steer_axis * seat_upper_below_head
+	c.front_suspension.lower_attachment = head_point - steer_axis * seat_lower_below_head
+	c.front_suspension.stiffness = 12000.0
+	c.front_suspension.damping = 400.0
+	c.front_suspension.rest_displacement = 0.0
+	c.front_suspension.travel_limits_enabled = true
+	c.front_suspension.lower_travel_limit = -0.12
+	c.front_suspension.upper_travel_limit = 0.03
 	return c

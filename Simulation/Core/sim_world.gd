@@ -3,7 +3,8 @@ extends RefCounted
 ##
 ## Step pipeline (differences from the conceptual pipeline are noted in ARCHITECTURE.md):
 ##  1. capture previous state (for render interpolation)
-##  2. accumulate gravity into force accumulators
+##  2. accumulate gravity into force accumulators, then the forces of every registered force provider (evaluated from the
+##     start-of-step state, once per fixed step)
 ##  3. integrate velocities (forces, torques, implicit-midpoint gyroscopic update); validate the result (see below)
 ##  4. zero the split (pseudo) velocities
 ##  5. prepare + solve constraints: physical velocity pass, then split-impulse pass (positional correction, M1.3)
@@ -22,10 +23,13 @@ const SimRigidBody = preload("res://Simulation/Core/sim_rigid_body.gd")
 const SimIntegrator = preload("res://Simulation/Core/sim_integrator.gd")
 const ConstraintSolver = preload("res://Simulation/Solver/constraint_solver.gd")
 const SimConstraint = preload("res://Simulation/Solver/sim_constraint.gd")
+const SimForceProvider = preload("res://Simulation/Core/sim_force_provider.gd")
 
 var config: SimConfig = SimConfig.new()
 var bodies: Array = []
 var constraints: Array = []
+## Generic per-step force providers (springs, dampers, ...), asked once per fixed step after gravity (SimForceProvider).
+var force_providers: Array = []
 var step_count: int = 0
 var simulation_time: float = 0.0
 var accumulator: float = 0.0
@@ -70,6 +74,9 @@ func remove_body(body: SimRigidBody) -> void:
 		var c: SimConstraint = constraints[i]
 		if c.body_a == body or c.body_b == body:
 			constraints.remove_at(i)
+	for i in range(force_providers.size() - 1, -1, -1):
+		if force_providers[i].involved_bodies().has(body):
+			force_providers.remove_at(i)
 	bodies.erase(body)
 
 
@@ -98,6 +105,38 @@ func add_constraint(constraint: SimConstraint) -> SimConstraint:
 
 func remove_constraint(constraint: SimConstraint) -> void:
 	constraints.erase(constraint)
+
+
+## Returns the provider, or null (with an error) if it is null, involves a body that is null or not registered in this world
+## (identity check), or reports invalid data (SimForceProvider.validate()). Same policy as add_constraint().
+func add_force_provider(provider: SimForceProvider) -> SimForceProvider:
+	if provider == null:
+		push_error("SimWorld.add_force_provider: rejected null force provider.")
+		return null
+	var membership_error: String = _provider_membership_error(provider)
+	if membership_error != "":
+		push_error("SimWorld.add_force_provider: rejected force provider: %s." % membership_error)
+		return null
+	var errors: PackedStringArray = provider.validate()
+	if not errors.is_empty():
+		push_error("SimWorld.add_force_provider: rejected invalid force provider: %s" % "; ".join(errors))
+		return null
+	force_providers.append(provider)
+	return provider
+
+
+func remove_force_provider(provider: SimForceProvider) -> void:
+	force_providers.erase(provider)
+
+
+## "" if every body the provider involves is registered in this world, otherwise a description of the violation.
+func _provider_membership_error(provider: SimForceProvider) -> String:
+	for body in provider.involved_bodies():
+		if body == null:
+			return "an involved body is null"
+		if not has_body(body):
+			return "an involved body is not registered in this world"
+	return ""
 
 
 ## "" if both bodies of the constraint are registered in this world, otherwise a description of the violation.
@@ -140,6 +179,17 @@ func preflight() -> bool:
 					var constraint_errors: PackedStringArray = constraints[i].validate()
 					if not constraint_errors.is_empty():
 						message = "constraint %d is invalid: %s" % [i, "; ".join(constraint_errors)]
+						break
+			if message == "":
+				# Provider data is mutable (stiffness, damping, ...) and bodies/providers are public: re-checked every step.
+				for i in force_providers.size():
+					var provider_membership_error: String = _provider_membership_error(force_providers[i])
+					if provider_membership_error != "":
+						message = "force provider %d violates world membership: %s" % [i, provider_membership_error]
+						break
+					var provider_errors: PackedStringArray = force_providers[i].validate()
+					if not provider_errors.is_empty():
+						message = "force provider %d is invalid: %s" % [i, "; ".join(provider_errors)]
 						break
 	last_error = message
 	if message == "":
@@ -218,6 +268,9 @@ func _step_unchecked() -> bool:
 	for body in bodies:
 		if not body.is_static():
 			body.apply_force(config.gravity * body.mass)
+	for provider in force_providers:
+		if provider.enabled:
+			provider.apply_forces(dt, config)
 	for body in bodies:
 		if not SimIntegrator.integrate_velocities(body, dt):
 			_abort_step("body %d (%s): implicit gyroscopic solve failed (non-finite input or no convergence, |w| dt = %s)" % [body.id, body.body_name, body.angular_velocity.length() * dt])

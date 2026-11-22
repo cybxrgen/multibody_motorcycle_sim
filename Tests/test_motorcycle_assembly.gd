@@ -1,13 +1,19 @@
 extends "res://Tests/sim_test_case.gd"
-## M2.1 rigid motorcycle assembly: five independent dynamic rigid bodies joined by four generic hinges
-## (Simulation/Motorcycle/). Fully dynamic world, zero gravity unless a test says otherwise; no body is static.
+## M2.1 rigid motorcycle assembly (graph updated for M2.2: the fork is now two bodies, steering assembly and fork slider, joined by
+## the generic prismatic joint; this file still tests the hinge structure and the rear assembly, the front fork/suspension tests
+## are in test_prismatic_joint.gd, test_front_suspension.gd and test_motorcycle_front_suspension.gd). Six independent dynamic rigid
+## bodies, four generic hinges and one prismatic joint (Simulation/Motorcycle/). Fully dynamic world, zero gravity unless a test
+## says otherwise; no body is static. The front suspension spring-damper is part of every assembly built here (stiffness 12 kN/m,
+## damping 400 N s/m, prototype values): it only loads the fork's axial direction, which the hinge probes below do not excite
+## except through the shared bodies; where a test needs the hinge structure in isolation the spring is not involved because the
+## probes act on the other joints or on the wheels.
 ##
 ## A construction and validity      B kinematic structure at the reference pose
 ## C degrees of freedom (probes)    D coupled dynamics and conservation
 ## E free fall / determinism        F regression sensitivity (missing hinge, wrongly configured axis)
 ##
 ## Methodology notes (numbers are from measurements of this assembly; the mechanism is stated where one is known):
-## * Solver: 100 iterations, the value the hinge tests use for converged velocity rows. Residuals of this five-body chain were
+## * Solver: 200 iterations (100 before M2.2, the value the hinge tests use for converged velocity rows). Residuals of this five-body chain were
 ##   measured to converge with the iteration count (worst velocity-row residual 0.045 rad/s at 20, 0.007 at 50, 2.3e-4 at 100).
 ## * Velocity-row residuals are evaluated with the frames the solver linearized (start of the step, i.e. `previous_state` after
 ##   a step) because the rows are frozen per step (PROJECT_STATE.md). Measured against the END-of-step axis instead, a wheel
@@ -27,10 +33,14 @@ const MotorcyclePrototype = preload("res://Simulation/Motorcycle/motorcycle_prot
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
 
 const DT: float = 1.0 / 120.0
-const ITERATIONS: int = 100
+## 200 since M2.2 (was 100): with the fork split into steering assembly, prismatic joint and slider the front chain is longer and
+## scalar Gauss-Seidel converges more slowly. Measured pivot-velocity residual of the front axle after a 12/-9/15 N s impulse on the
+## front wheel: 5.9e-2 m/s at 20 iterations, 4.9e-3 at 100, 6.5e-4 at 200, 5.4e-4 at 400 and 1000 (the floor is the end-of-step
+## measurement-frame artifact described above). 100 iterations left the unchanged 2e-3 threshold violated; no tolerance was changed.
+const ITERATIONS: int = 200
 ## Pose-construction tolerances (float32, coordinates <= ~1 m): 4 roundings of ~1.2e-7 each, doubled for margin.
 const POSE_TOL: float = 2.0e-6
-## Names for the four joints in the fixed order used by Assembly.joints() / MotorcycleConfig.joint_specs().
+## Names for the four hinges in the fixed order used by Assembly.joints() / MotorcycleConfig.joint_specs().
 const JOINT_NAMES: Array = ["steering_head", "swingarm_pivot", "front_axle", "rear_axle"]
 
 
@@ -88,12 +98,12 @@ func _pair(a: MotorcycleAssembly, k: int) -> Array:
 func _sides(a: MotorcycleAssembly, k: int) -> Array:
 	match k:
 		0:
-			return [[a.chassis, a.swingarm, a.rear_wheel], [a.steering, a.front_wheel]]
+			return [[a.chassis, a.swingarm, a.rear_wheel], [a.steering, a.fork_slider, a.front_wheel]]
 		1:
-			return [[a.chassis, a.steering, a.front_wheel], [a.swingarm, a.rear_wheel]]
+			return [[a.chassis, a.steering, a.fork_slider, a.front_wheel], [a.swingarm, a.rear_wheel]]
 		2:
-			return [[a.chassis, a.swingarm, a.rear_wheel, a.steering], [a.front_wheel]]
-	return [[a.chassis, a.steering, a.front_wheel, a.swingarm], [a.rear_wheel]]
+			return [[a.chassis, a.swingarm, a.rear_wheel, a.steering, a.fork_slider], [a.front_wheel]]
+	return [[a.chassis, a.steering, a.fork_slider, a.front_wheel, a.swingarm], [a.rear_wheel]]
 
 
 ## Angular momentum of `bodies` about `point`, projected on `axis`: sum (x - p) x (m v) + I_world w.
@@ -133,15 +143,15 @@ func _body_finite(b: SimRigidBody) -> bool:
 # A. Construction and validity
 # =====================================================================================================================
 
-func test_a1_builds_five_dynamic_bodies_and_four_hinges() -> void:
+func test_a1_builds_six_dynamic_bodies_four_hinges_and_the_fork_joint() -> void:
 	var w: SimWorld = make_world()
 	var a: MotorcycleAssembly = MotorcycleBuilder.build(_config(), w)
 	check(a != null, "build succeeds")
 	if a == null:
 		return
 	check(a.world == w, "the assembly uses the world it was given")
-	check(w.bodies.size() == 5, "exactly five bodies registered (got %d)" % w.bodies.size())
-	check(w.constraints.size() == 4, "exactly four constraints registered (got %d)" % w.constraints.size())
+	check(w.bodies.size() == 6, "exactly six bodies registered (got %d)" % w.bodies.size())
+	check(w.constraints.size() == 5, "exactly five constraints registered: four hinges and the fork's prismatic joint (got %d)" % w.constraints.size())
 	for body in a.bodies():
 		check(w.has_body(body), "body '%s' is a member of the world" % body.body_name)
 		check(not body.is_static(), "body '%s' is dynamic" % body.body_name)
@@ -158,34 +168,35 @@ func test_a1_builds_five_dynamic_bodies_and_four_hinges() -> void:
 	var w2: SimWorld = make_world()
 	var existing: SimRigidBody = w2.add_body(make_static())
 	var a2: MotorcycleAssembly = MotorcycleBuilder.build(_config(), w2)
-	check(a2 != null and w2.bodies.size() == 6 and w2.constraints.size() == 4, "building into a populated world adds exactly 5 bodies and 4 hinges")
+	check(a2 != null and w2.bodies.size() == 7 and w2.constraints.size() == 5, "building into a populated world adds exactly 6 bodies, 4 hinges and 1 prismatic joint")
 	check(w2.bodies[0] == existing, "pre-existing content keeps its place")
 	# Without a world argument the builder creates its own.
 	var a3: MotorcycleAssembly = MotorcycleBuilder.build(_config())
-	check(a3 != null and a3.world != null and a3.world.bodies.size() == 5, "a world is created when none is passed")
+	check(a3 != null and a3.world != null and a3.world.bodies.size() == 6, "a world is created when none is passed")
 
 
 func test_a2_named_references_identify_the_correct_objects() -> void:
 	var a: MotorcycleAssembly = _build()
 	if a == null:
 		return
-	var expected_names: Array = ["chassis", "steering", "swingarm", "front_wheel", "rear_wheel"]
+	var expected_names: Array = ["chassis", "steering", "fork_slider", "swingarm", "front_wheel", "rear_wheel"]
 	var bodies: Array = a.bodies()
-	for i in 5:
+	for i in 6:
 		check(bodies[i].body_name == expected_names[i], "bodies()[%d] is '%s' (got '%s')" % [i, expected_names[i], bodies[i].body_name])
-	check(a.world.bodies[0] == a.chassis and a.world.bodies[1] == a.steering and a.world.bodies[2] == a.swingarm \
-		and a.world.bodies[3] == a.front_wheel and a.world.bodies[4] == a.rear_wheel, "world order equals the named order")
+	check(a.world.bodies[0] == a.chassis and a.world.bodies[1] == a.steering and a.world.bodies[2] == a.fork_slider \
+		and a.world.bodies[3] == a.swingarm and a.world.bodies[4] == a.front_wheel and a.world.bodies[5] == a.rear_wheel, "world order equals the named order")
 	var ids: Dictionary = {}
 	for b in bodies:
 		ids[b.id] = true
-	check(ids.size() == 5, "five distinct body ids")
+	check(ids.size() == 6, "six distinct body ids")
 	check(a.steering_joint.body_a == a.chassis and a.steering_joint.body_b == a.steering, "steering joint: chassis <-> steering")
 	check(a.swingarm_joint.body_a == a.chassis and a.swingarm_joint.body_b == a.swingarm, "swingarm joint: chassis <-> swingarm")
-	check(a.front_axle_joint.body_a == a.steering and a.front_axle_joint.body_b == a.front_wheel, "front axle joint: steering <-> front wheel")
+	check(a.front_axle_joint.body_a == a.fork_slider and a.front_axle_joint.body_b == a.front_wheel, "front axle joint: fork slider <-> front wheel (not the upper steering assembly)")
 	check(a.rear_axle_joint.body_a == a.swingarm and a.rear_axle_joint.body_b == a.rear_wheel, "rear axle joint: swingarm <-> rear wheel")
 	var joints: Array = a.joints()
 	check(joints[0] == a.steering_joint and joints[1] == a.swingarm_joint and joints[2] == a.front_axle_joint and joints[3] == a.rear_axle_joint, "joints() order")
-	check(a.world.constraints.size() == 4, "the world holds exactly the four named joints")
+	check(a.world.constraints.size() == 5, "the world holds exactly the four named hinges and the prismatic fork joint")
+	check(a.world.constraints[4] == a.fork_joint and a.fork_joint.body_a == a.steering and a.fork_joint.body_b == a.fork_slider, "constraint 4 is the fork joint: steering <-> fork slider")
 	for i in mini(4, a.world.constraints.size()):
 		check(a.world.constraints[i] == joints[i], "constraint %d in the world is the named %s joint" % [i, JOINT_NAMES[i]])
 
@@ -197,15 +208,15 @@ func test_a3_mass_properties_are_explicit_and_independent() -> void:
 	var specs: Array = a.config.body_specs()
 	var bodies: Array = a.bodies()
 	var sum: float = 0.0
-	for i in 5:
+	for i in 6:
 		check_near(bodies[i].mass, specs[i].mass, 0.0, "body %d mass equals its configured mass exactly" % i)
 		check_basis_near(bodies[i].local_inertia, specs[i].local_inertia, 0.0, "body %d inertia equals its configured tensor" % i)
 		check_vec3_near(bodies[i].position, specs[i].position, 0.0, "body %d COM equals its configured COM" % i)
 		sum += specs[i].mass
-	check_near(a.total_mass(), sum, 1.0e-9, "total_mass() is the sum of the five masses")
+	check_near(a.total_mass(), sum, 1.0e-9, "total_mass() is the sum of the six masses")
 	# Nothing is merged into the chassis: no body carries the total, and the wheels/carriers have their own mass.
 	check(a.chassis.mass < a.total_mass() - 1.0, "the chassis does not carry the whole mass (%s of %s kg)" % [a.chassis.mass, a.total_mass()])
-	check(a.front_wheel.mass != a.rear_wheel.mass and a.steering.mass != a.swingarm.mass, "masses are independent per body")
+	check(a.front_wheel.mass != a.rear_wheel.mass and a.steering.mass != a.swingarm.mass and a.fork_slider.mass != a.steering.mass, "masses are independent per body")
 
 
 func test_a4_every_inertia_is_valid_symmetric_positive_definite_and_well_conditioned() -> void:
@@ -237,9 +248,11 @@ func test_a5_primitive_inertias_match_their_documented_formulas() -> void:
 	check_near(ch.x.x, 120.0 / 12.0 * (0.55 * 0.55 + 1.0 * 1.0), 1.0e-4, "chassis I_xx of the 0.30 x 0.55 x 1.00 m box")
 	check_near(ch.y.y, 120.0 / 12.0 * (0.30 * 0.30 + 1.0 * 1.0), 1.0e-4, "chassis I_yy")
 	check_near(ch.z.z, 120.0 / 12.0 * (0.30 * 0.30 + 0.55 * 0.55), 1.0e-4, "chassis I_zz")
-	# Fork frame: local +Y is the steering axis, so the moment about the steering axis is the box's I_yy (0.70 m side).
+	# Fork frame: local +Y is the steering axis, so the moment about the steering axis is the box's I_yy (the sides perpendicular to it).
 	var steer_axis: Vector3 = a.config.steering_head.axis
-	check_near(steer_axis.dot(a.steering.inertia_world * steer_axis), 22.0 / 12.0 * (0.60 * 0.60 + 0.16 * 0.16), 1.0e-4, "fork assembly: moment about the steering axis = box I_yy (frame rotated by the rake)")
+	check_near(steer_axis.dot(a.steering.inertia_world * steer_axis), 14.0 / 12.0 * (0.60 * 0.60 + 0.16 * 0.16), 1.0e-4, "steering assembly: moment about the steering axis = box I_yy (frame rotated by the rake)")
+	check_near(steer_axis.dot(a.fork_slider.inertia_world * steer_axis), 8.0 / 12.0 * (0.24 * 0.24 + 0.14 * 0.14), 1.0e-4, "fork slider: moment about the fork axis = box I_yy (frame rotated by the rake)")
+	check_vec3_near(Basis(a.fork_slider.orientation) * Vector3.UP, steer_axis, POSE_TOL, "slider-local +Y maps onto the steering axis")
 	check_vec3_near(Basis(a.steering.orientation) * Vector3.UP, steer_axis, POSE_TOL, "fork-local +Y maps onto the steering axis")
 	# Swingarm frame: local +Z along the arm (pivot -> axle); moment about the arm direction is the box I_zz (0.20 x 0.10).
 	var arm_dir: Vector3 = (a.config.rear_axle.point - a.config.swingarm_pivot.point).normalized()
@@ -323,15 +336,15 @@ func test_a7_invalid_configuration_is_rejected_without_partial_registration() ->
 	check(w.constraints[0] == joint and w.preflight(), "the pre-existing world still passes preflight")
 	# The same world accepts a valid assembly afterwards.
 	var ok: MotorcycleAssembly = MotorcycleBuilder.build(_config(), w)
-	check(ok != null and w.bodies.size() == 7 and w.constraints.size() == 5, "after rejected attempts a valid build still succeeds")
+	check(ok != null and w.bodies.size() == 8 and w.constraints.size() == 6, "after rejected attempts a valid build still succeeds")
 
 
 func test_a8_registration_failure_rolls_back_every_partial_registration() -> void:
 	# Failure of the n-th add_body (first, middle, last) and the n-th add_constraint (first .. last): nothing may remain.
 	var failures: Array = []
-	for n in range(1, 6):
+	for n in range(1, 7):
 		failures.append([n, -1, "add_body #%d" % n])
-	for n in range(1, 5):
+	for n in range(1, 6):
 		failures.append([-1, n, "add_constraint #%d" % n])
 	for f in failures:
 		var w: FailingWorld = FailingWorld.new()
@@ -346,13 +359,13 @@ func test_a8_registration_failure_rolls_back_every_partial_registration() -> voi
 		var a: MotorcycleAssembly = MotorcycleBuilder.build(cfg, w)
 		check(a == null, "%s refused: build returns null" % f[2])
 		check(w.bodies == bodies_before, "%s refused: bodies rolled back (%d left)" % [f[2], w.bodies.size()])
-		check(w.constraints.is_empty(), "%s refused: no constraint left (%d)" % [f[2], w.constraints.size()])
+		check(w.constraints.is_empty() and w.force_providers.is_empty(), "%s refused: no constraint or force provider left (%d, %d)" % [f[2], w.constraints.size(), w.force_providers.size()])
 		check(w.has_body(existing) and cfg.chassis.mass == mass_before, "%s refused: pre-existing body and the configuration are untouched" % f[2])
 		# No stale state: the same world builds a complete assembly once the injected failure is lifted.
 		w.fail_body_call = -1
 		w.fail_constraint_call = -1
 		var retry: MotorcycleAssembly = MotorcycleBuilder.build(_config(), w)
-		check(retry != null and w.bodies.size() == 6 and w.constraints.size() == 4, "%s refused: a retry on the same world succeeds completely" % f[2])
+		check(retry != null and w.bodies.size() == 7 and w.constraints.size() == 5 and w.force_providers.size() == 1, "%s refused: a retry on the same world succeeds completely" % f[2])
 		if retry != null:
 			check(w.step(), "%s refused: the retried assembly steps" % f[2])
 
@@ -643,7 +656,7 @@ func test_c2_wheels_spin_freely_about_their_axles_without_disturbing_anything_el
 		for other in a.bodies():
 			if other != wheel:
 				check(other.linear_velocity.length() <= 1.0e-7 and other.angular_velocity.length() <= 1.0e-7, "%s: untouched by the wheel spin (v %s, w %s)" % [other.body_name, other.linear_velocity, other.angular_velocity])
-		check(carrier.position.is_equal_approx(a.config.steering.position) or carrier.position.is_equal_approx(a.config.swingarm.position), "the carrier did not move")
+		check(carrier.position.is_equal_approx(a.config.fork_slider.position) or carrier.position.is_equal_approx(a.config.swingarm.position), "the carrier did not move")
 		check(joint.linear_error().length() <= POSE_TOL and joint.axis_error_angle() <= POSE_TOL, "%s: axle joint error stays at construction level" % wheel.body_name)
 
 
