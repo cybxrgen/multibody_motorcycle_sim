@@ -8,7 +8,7 @@ equations and sign conventions → `PHYSICS_CONVENTIONS.md`; test methodology �
 Describes only modules that exist; planned systems are not listed here until they are built.
 
 ## Principle
-One authoritative simulation (`SimWorld`) owns all physical state. Motorcycle parts (M2.1: five rigid bodies, four hinges) are independent rigid bodies, and rider segments will be, coupled
+One authoritative simulation (`SimWorld`) owns all physical state. Motorcycle parts (M2.2: six rigid bodies, four hinges, one prismatic joint) are independent rigid bodies, and rider segments will be, coupled
 only through constraints. Godot nodes only visualize published state. The core is generic: no vehicle or rider special cases.
 
 ## Modules
@@ -19,22 +19,25 @@ only through constraints. Godot nodes only visualize published state. The core i
 | `Simulation/Core/sim_body_state.gd` | Kinematic snapshot + interpolation (render contract) |
 | `Simulation/Core/sim_rigid_body.gd` | Body state (COM pose, physical velocities, solver-scratch split velocities, accumulators), force/torque/impulse API; `set_mass_properties` rejects invalid input (returns bool) |
 | `Simulation/Core/sim_integrator.gd` | Semi-implicit Euler, implicit-midpoint gyroscopic update (`solve_free_rotation`, Newton in float64; returns false when it fails), quaternion exponential update; positions advance with physical + split velocity |
-| `Simulation/Core/sim_world.gd` | Body and constraint registry, accumulator-driven fixed stepping, step pipeline (zeroes the split velocities around the solve), non-finite/invalid-state detection with step abort and rollback (`numerical_fault`), diagnostics, `preflight()` |
+| `Simulation/Core/sim_force_provider.gd` | Generic base class of a per-step force provider (`involved_bodies()`, `validate()`, `apply_forces(dt, config)`, `enabled`); see D21 |
+| `Simulation/Core/sim_world.gd` | Body, constraint and force-provider registry (`add_force_provider()`/`remove_force_provider()`; `remove_body()` also drops providers that involve the body),  accumulator-driven fixed stepping, step pipeline (zeroes the split velocities around the solve), non-finite/invalid-state detection with step abort and rollback (`numerical_fault`), diagnostics, `preflight()` |
 | `Simulation/Solver/constraint_row.gd` | Scalar row: Jacobian, bias, softness, effective mass, accumulated impulse, [min,max] limits, warm start, PGS update; split channel (split bias, split bounds, split accumulated impulse, `solve_split()`) |
 | `Simulation/Solver/sim_constraint.gd` | Base constraint between two bodies owning rows; `_update_rows` hook; `solve_iteration()` and `solve_split_iteration()` hooks (default: every row in order); `reset_warm_start()` (invalidates carried impulses after an aborted step; override if state lives outside the rows); `validate()`/`is_valid()` (default valid) |
 | `Simulation/Solver/ball_joint_constraint.gd` | Ball joint: 3 rows (physical `Cdot = 0`, split bias for the anchor error), anchor queries |
 | `Simulation/Solver/hinge_joint_constraint.gd` | Hinge: 8 rows (3 anchor, 2 axis alignment, motor, lower limit, upper limit), continuous angle, torque→impulse cap; extends `SimConstraint`, uses `ConstraintRow` unchanged, solved by the unchanged `ConstraintSolver` |
+| `Simulation/Solver/prismatic_joint_constraint.gd` | Generic prismatic joint: 7 rows (2 lateral, 2 axis alignment, 1 twist, lower limit, upper limit) = free axial translation, 5 constrained DOF, optional finite travel limits, signed translation coordinate; extends `SimConstraint`, uses `ConstraintRow` unchanged, unchanged `ConstraintSolver`; `from_world()` factory like the hinge's |
 | `Simulation/Solver/contact_constraint.gd` | Generic one-point contact: unilateral normal row (speculative physical bias; penetration removed through its split channel) + isotropic Coulomb friction (two tangent rows solved as one 2×2 block and projected onto a disk); extends `SimConstraint`, reuses `ConstraintRow`, validates its own data |
 | `Simulation/Solver/constraint_solver.gd` | prepare → iterate `solve_iteration()` of each active constraint (physical pass) → zero the split velocities of the bodies involved → iterate `solve_split_iteration()` (split pass) → finish; generic (no body-type or contact logic) |
-| `Simulation/Motorcycle/motorcycle_body_spec.gd`, `motorcycle_joint_spec.gd` | Plain data for one body (name, mass, COM inertia tensor, COM pose, box proxy size) and one hinge (world pivot, world axis) |
-| `Simulation/Motorcycle/motorcycle_config.gd` | `MotorcycleConfig`: the five body specs, four joint specs and wheel dimensions; `validate()` (single home of the rules, one message per violated rule); `wheel_inertia()` hollow-cylinder helper |
-| `Simulation/Motorcycle/motorcycle_builder.gd` | `MotorcycleBuilder.build(config, world = null)`: validates, creates the five bodies and four `HingeJointConstraint`s (via `from_world`) in one `SimWorld`, self-checks the construction contract, rolls back on any failure; `hinge_reference()`, `construction_error()` |
-| `Simulation/Motorcycle/motorcycle_assembly.gd` | Result object: the world plus named references to the five bodies and four joints; `bodies()`, `joints()`, `total_mass()`, `max_anchor_error()`, `max_axis_error()`. Owns no physical state |
+| `Simulation/Motorcycle/motorcycle_body_spec.gd`, `motorcycle_joint_spec.gd`, `motorcycle_suspension_spec.gd` | Plain data for one body (name, mass, COM inertia tensor, COM pose, box proxy size), one joint (world point, world axis) and the front suspension (spring seats, stiffness, damping, rest displacement, travel limits) |
+| `Simulation/Motorcycle/front_suspension.gd` | `FrontSuspension` (a `SimForceProvider`): linear spring-damper along the fork joint's axis, equal and opposite forces at the two spring seats; queries (`displacement()`, `relative_velocity()`, `spring_force()`, `damping_force()`, `axial_force()`, `spring_energy()`, `damping_power()`) |
+| `Simulation/Motorcycle/motorcycle_config.gd` | `MotorcycleConfig`: the six body specs, four hinge specs, the fork's prismatic joint spec, the suspension spec and wheel dimensions; `validate()` (single home of the rules, one message per violated rule); `wheel_inertia()` hollow-cylinder helper |
+| `Simulation/Motorcycle/motorcycle_builder.gd` | `MotorcycleBuilder.build(config, world = null)`: validates, creates the six bodies, four `HingeJointConstraint`s and the fork's `PrismaticJointConstraint` (via `from_world`) and registers the `FrontSuspension` as a force provider in one `SimWorld`, self-checks the construction contract, rolls back on any failure; `hinge_reference()`, `construction_error()` |
+| `Simulation/Motorcycle/motorcycle_assembly.gd` | Result object: the world plus named references to the six bodies, the four hinges, `fork_joint` and `front_suspension`; `bodies()`, `joints()` (the four hinges), `constraints()` (all five), `total_mass()`, `max_anchor_error()`, `max_axis_error()`, `fork_error()`. Owns no physical state |
 | `Simulation/Motorcycle/motorcycle_prototype.gd` | `MotorcyclePrototype.config()`: ILLUSTRATIVE fixture values (not a real motorcycle), derived from a few named dimensions |
 | `Simulation/Debug/debug_draw_3d.gd`, `simulation_debug.gd` | Line batcher (ImmediateMesh); world axes, COM markers, local axes, joint anchors, text report |
 | `Simulation/Presentation/body_visual_proxy.gd`, `simulation_renderer.gd` | Interpolated primitive-mesh proxies, read-only; a proxy mesh may be offset from the COM frame and a body may have several proxies (wheel cylinder + spoke markers) |
 | `Scenes/main.tscn`, `Scenes/simulation_test.tscn` (+ `.gd`) | Entry scene; inspection scenario (double pendulum, free spinner), camera, HUD, key controls |
-| `Scenes/motorcycle_test.tscn` (+ `.gd`) | M2.1 demonstration: the prototype assembly in zero gravity with zero-momentum initial relative rotations; reads published state only |
+| `Scenes/motorcycle_test.tscn` (+ `.gd`) | M2.1/M2.2 demonstration: the prototype assembly in zero gravity with zero-momentum initial relative rotations and a fork-axis kick; steering assembly and fork slider drawn as separate parts; HUD of fork displacement/velocity from published state; reads published state only |
 | `Tests/` | Headless runner, assertion base class, test files (see `TESTING.md`) |
 | `Tools/make_delivery.sh` | Verified ZIP + manifest + SHA-256 (three separate files) from an exact commit; see `AGENTS.md` §7 |
 
@@ -44,11 +47,11 @@ Scripts reference each other through `preload` constants (no `class_name`), so h
 
 ## State ownership and data flow
 `SimWorld.bodies` owns the list; each `SimRigidBody` owns its pose, velocities and accumulators. `SimWorld.constraints` owns the constraints; each
-constraint owns its rows (and their warm-start impulses). Only `SimWorld.step()` and the integrator mutate bodies during a step; the solver changes
+constraint owns its rows (and their warm-start impulses). `SimWorld.force_providers` owns the force providers; a provider owns only its own parameters and reads body state. Only `SimWorld.step()` and the integrator mutate bodies during a step; the solver changes
 bodies only through their velocities. External code may apply forces/impulses between steps. Render code reads `previous_state` / `published_state` only.
 
 ### Execution pipeline (`SimWorld._step_unchecked`, after `preflight`)
-capture previous state → add gravity force (m·g) → integrate velocities (F/m, torque, implicit gyroscopic update) → **state check** (dynamic velocities; poses of all bodies, static included) → zero split velocities → constraint prepare → **physical PGS pass** → **state check** (velocities) → **split-impulse PGS pass** →
+capture previous state → add gravity force (m·g) → **force providers** (`apply_forces(dt, config)` of every enabled provider, from the start-of-step state) → integrate velocities (F/m, torque, implicit gyroscopic update) → **state check** (dynamic velocities; poses of all bodies, static included) → zero split velocities → constraint prepare → **physical PGS pass** → **state check** (velocities) → **split-impulse PGS pass** →
 integrate positions (x += (v + v_s) dt, q = exp((ω + ω_s) dt/2) q) → zero split velocities → **state check** (velocities and poses) → publish state → clear accumulators.
 Stabilization is the split pass: positional error is corrected through temporary split velocities that move the pose and are never stored as physical velocity (decisions D13–D15).
 The physical pass never reads split state and the split pass never reads or writes physical velocities or impulses (it reads only poses and inertia through the shared Jacobians), so the ordering only fixes determinism. Friction, motor and speculative biases live entirely in the physical pass; `SimWorld` and `ConstraintSolver` contain no joint- or contact-specific stabilization logic.
@@ -68,6 +71,7 @@ which conserves `|L|` and the rotational kinetic energy of a torque-free body ex
   distinct message (not per call). Fixing the cause resumes simulation.
 - `SimWorld.add_body()` returns null for invalid mass properties; `SimWorld.add_constraint()` returns null for a null constraint, a constraint with a null body or a body that is not a registered member of this world, or invalid constraint data.
   `interpolation_alpha()` returns 0 for an invalid timestep. `step()` returns bool; `SimRigidBody.set_mass_properties()` returns bool.
+- `SimWorld.add_force_provider()` returns null for a null provider, a provider that involves a null body or a body that is not a registered member (identity), or invalid provider data (`validate()`); `preflight()` re-checks membership and `validate()` of every provider every step, exactly like constraints.
 - `BallJointConstraint` inherits the always-valid default. `HingeJointConstraint` and `ContactConstraint` validate their own data in `validate()` (nothing is duplicated in `SimWorld`), so invalid contact data is refused both by `add_constraint()` and by `preflight()` after later mutation.
 
 ### Numerical failure containment (D17)
@@ -95,30 +99,34 @@ after the solve, possibly with non-finite values. An abort therefore **invalidat
 to every normal step to preserve warm-start values of a world that, after a fault, has to be inspected and repaired by the caller anyway. The hinge angle tracker needs no handling:
 the solver only samples the unchanged start-of-step poses, which equal the restored poses.
 
-## Motorcycle assembly (M2.1)
+## Motorcycle assembly (M2.1, front fork extended in M2.2)
 `Simulation/Motorcycle/` builds the vehicle **on top of** the generic simulator; it adds no motorcycle logic to `Simulation/Core` or `Simulation/Solver`.
-Body / joint graph (hinge between A and B; every joint is an unmodified `HingeJointConstraint`, all registered in one `SimWorld` with their bodies):
+Body / joint graph (joint between A and B; the hinges are unmodified `HingeJointConstraint`s, the fork joint a generic `PrismaticJointConstraint`, all registered in one `SimWorld` with their bodies; the spring-damper is a force provider of the same world):
 
 ```
-chassis --steering_head (axis: raked steering axis)--> steering (fork + stem + front-wheel carrier, ONE rigid body)
-   |                                                        \--front_axle (+X)--> front_wheel
+chassis --steering_head (axis: raked steering axis)--> steering (steering stem + upper fork structure)
+   |                                                        \--fork_travel (prismatic, along the fork axis = steering axis)--> fork_slider (lower fork + axle carrier)
+   |                                                                                                                         \--front_axle (+X)--> front_wheel
    \--swingarm_pivot (+X)--> swingarm --rear_axle (+X)--> rear_wheel
+        front suspension: spring-damper force provider between steering and fork_slider, along the fork axis
 ```
-All five bodies are dynamic with their own mass and full inertia tensor about their own COM; nothing is merged into the chassis. The assembly has no limits, motor,
-spring, damper, ground, tire or drive: each hinge frees exactly one relative rotation and constrains the other five relative DOF (3 translation, 2 rotation), so the
-assembly is a free 5-body tree with 4 internal rotational DOF.
+All six bodies are dynamic with their own mass and full inertia tensor about their own COM; nothing is merged into the chassis or into each other (the slider is not merged into the wheel or the steering assembly). Each hinge frees exactly one relative rotation and
+constrains the other five relative DOF (3 translation, 2 rotation); the prismatic joint frees one relative translation and constrains the other five. The hinges have no limits, motor, spring or damper; the fork has the spring-damper and travel limits; there is no ground, tire, rear suspension or drive. The assembly is a free 6-body tree with 4 internal rotational DOF and 1 internal translational DOF.
 
 Construction contract: the configuration gives geometry **once**, in world coordinates at the reference pose (COM poses, and for each hinge a pivot point and axis). The
 builder derives each body's local anchor, axis and reference direction with `HingeJointConstraint.from_world`, using one deterministic world reference direction per hinge
-(`hinge_reference`: the world basis vector least aligned with the axis, projected perpendicular to it). The two local axes and reference vectors of a hinge are therefore
+(`hinge_reference`: the world basis vector least aligned with the axis, projected perpendicular to it; the fork joint uses the same helper). The two local axes and reference vectors of a hinge are therefore
 generally different vectors (fork frame rotated by the rake, swingarm frame by its tilt), while the world frames coincide: zero anchor error, zero axis error, zero angle.
 `construction_error()` re-checks this (anchors 1e-5 m, axes 1e-5 rad) on the finished assembly. Failure policy follows `add_body` / `add_constraint` / `from_world`:
 `build()` returns null with `push_error`; an invalid configuration is rejected before anything is registered, and any later failure (mass properties, `add_body`, hinge
-creation, `add_constraint`, construction contract) removes exactly the bodies and constraints this call added (a passed-in world keeps its earlier content; body ids are not reused).
+creation, prismatic joint creation, `add_constraint`, suspension creation, `add_force_provider`, construction contract) removes exactly the bodies, constraints and force providers this call added (a passed-in world keeps its earlier content; body ids are not reused).
 The prototype fixture is deliberately separate from the schema (`motorcycle_prototype.gd`) and is labelled illustrative.
 
 Sign conventions of the fixture (not of the schema; the axis sign in the config defines the positive angle): steering hinge positive = steering left; swingarm positive = rear end down;
 wheel axle +X, so rolling forward is a negative rate about the axle axis.
+
+## Front suspension (M2.2)
+Update flow per fixed step: `SimWorld._step_unchecked` → gravity → `FrontSuspension.apply_forces(dt, config)` (reads the fork joint's world axis and the two bodies' current poses and velocities; `apply_force_at_point` on the slider and, reversed, on the steering assembly) → velocity integration → solver (the prismatic rows constrain the five directions and the limits act on the axial one) → position integration. Dependencies: `FrontSuspension → SimForceProvider` (Core), `PrismaticJointConstraint` (read-only queries), `SimRigidBody`; nothing in Core or Solver references the suspension. The spring seats and the axis come from configuration world geometry (builder: `FrontSuspension.from_world`); the prismatic joint's axis points from the steering assembly toward the slider, so a positive coordinate is fork extension. Equations, signs and energy behaviour: `PHYSICS_CONVENTIONS.md` ("Prismatic joint", "Front suspension spring-damper").
 
 ## Solver design
 - Rows are scalar and solved sequentially (Gauss-Seidel); a ball joint is three rows along world axes, so its 3×3 block is not solved simultaneously.
@@ -156,6 +164,10 @@ wheel axle +X, so rolling forward is a negative rate about the axle axis.
 - D19: the builder is all-or-nothing: validate first, register, then roll back exactly what it added on any failure; the construction check is a public function so it can be tested (honest input cannot trip it: pivots far from the origin stay self-consistent on the float32 grid, measured at 1e6 m).
 - D20: M2.1 hinges are free (no limits, no motor): limits and actuators belong to later, explicitly authorized milestones; a hidden limit or stabilizer would be a hidden corrective force (`AGENTS.md` §4).
 
+- D21: a generic per-step force-provider hook (`SimForceProvider`, `SimWorld.force_providers`) was necessary. Forces applied to a body are consumed and cleared by ONE fixed step, but `advance()` may run several fixed steps per frame; a state-dependent spring-damper applied by the caller once per frame would act on the first step only and be evaluated at the render rate, not the simulation rate. The hook is generic (the world knows nothing about suspensions), mirrors the constraint registry rules (membership by identity, validation at registration and in `preflight()`, removal with the body) and keeps all motorcycle logic in `Simulation/Motorcycle/`. Rejected: a suspension-specific branch in `SimWorld`; implementing the spring as a constraint (it is a force, with no impulse bounds or Jacobian rows); callbacks driven by the scene.
+- D22: the prismatic joint is a generic constraint with 7 rows (the two limit rows exist always; inactive rows have bounds [0, 0], the hinge pattern). Its translation coordinate is the anchor offset projected on A's axis and the lateral rows move with A's frame, so their A-side angular Jacobian carries the `(r_a + d) × e` lever term (the axial offset swings the axis line sideways); this term was verified against central finite differences. The twist row uses the sine of the relative rotation about the axis, like the hinge's axis rows (valid only well below 90° of relative rotation).
+- D23: the suspension force acts on the two spring seats, which must lie on one line parallel to the fork axis (a central, equal and opposite pair): a non-central pair would add angular momentum to an isolated system, and the seats are therefore validated, not repaired. The damping evaluates the seats' relative velocity from the start-of-step state (explicit), so the force pair injects no energy for any state; the stability of the explicit evaluation is a time-step condition on `k` and `c` (`PHYSICS_CONVENTIONS.md`), not a hidden correction.
+
 ### Rejected / deferred options (with reasons)
 - Explicit gyroscopic term (previous implementation): unconditionally energy- and momentum-increasing, unstable over long runs (`PHYSICS_CONVENTIONS.md`). Single-step linearized implicit Euler gyroscopic solve: stable but dissipative, would damp intermediate-axis tumbling. Moving the free-rotor step into the position phase (exact `L` direction): larger change to the step structure; deferred.
 - Velocity clamping or `|ω|` caps, silencing the Godot error: rejected (hide the failure, no physical basis).
@@ -167,4 +179,4 @@ wheel axle +X, so rolling forward is a negative rate about the axle axis.
 ## Visualization contract
 `Scenes/simulation_test.gd` is the only runner: `world.advance(frame_delta)` (fixed-step accumulator) then `renderer.render(alpha)` /
 `debug_overlay.update_overlay(alpha)`, where alpha = `world.interpolation_alpha()`. Proxies and overlay read `previous_state`/`published_state` and never write bodies.
-`Scenes/motorcycle_test.gd` follows the same contract (advance, then render published state); its initial conditions are applied once when the scenario is built, never during the run. Mesh origin = body COM (a proxy mesh may carry a fixed offset). Scenes build their node trees in code; the `.tscn` files only attach scripts. Controls: Space pause, N step, R reset, L/C/J toggles, mouse orbit/zoom.
+`Scenes/motorcycle_test.gd` follows the same contract (advance, then render published state); its initial conditions are applied once when the scenario is built, never during the run. Its fork HUD recomputes displacement and axial velocity from `published_state` with the formula of `FrontSuspension` and never calls the live queries. Mesh origin = body COM (a proxy mesh may carry a fixed offset). Scenes build their node trees in code; the `.tscn` files only attach scripts. Controls: Space pause, N step, R reset, L/C/J toggles, mouse orbit/zoom.

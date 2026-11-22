@@ -1,6 +1,6 @@
 # Physics Conventions
 
-**Authoritative for:** units, coordinate frames, quaternion/angular-velocity, mass and inertia, force/impulse, constraint/Jacobian, hinge-joint,
+**Authoritative for:** units, coordinate frames, quaternion/angular-velocity, mass and inertia, force/impulse, constraint/Jacobian, hinge-joint, prismatic-joint, front-suspension spring-damper,
 contact and friction, stabilization, time-stepping and numerical-precision conventions. Binding for all simulation code.
 **Belongs elsewhere:** implementation progress and known limitations → `PROJECT_STATE.md`; module design → `ARCHITECTURE.md`;
 test results and methodology → `TESTING.md`.
@@ -45,6 +45,7 @@ test results and methodology → `TESTING.md`.
 - Force at a world point p: force += F, torque += (p − x_com) × F.
 - Impulse (N·s) changes velocity immediately: Δv = J/m, Δω = I_world⁻¹ ((p − x_com) × J). Impulses never touch the accumulators.
 - Angular impulse: Δω = I_world⁻¹ L.
+- State-dependent forces (springs, dampers) are not applied by the caller once per frame: they are registered as force providers and evaluated once per FIXED step, after gravity and before the velocity integration, from the state at the start of that step (`ARCHITECTURE.md`, D21).
 
 ## Rotational dynamics
 Continuous equation: `I_w ω̇ = τ − ω × (I_w ω)`, i.e. `α = I_w⁻¹ (τ − ω × I_w ω)`; the gyroscopic term is included. Equivalently the world angular momentum
@@ -100,6 +101,26 @@ Continuous equation: `I_w ω̇ = τ − ω × (I_w ω)`, i.e. `α = I_w⁻¹ (τ
 - Motor: row bias `-target_speed`; positive speed => positive angle rate (B along +a, A along -a); impulse bound `+-max_torque*dt` (`dt = config.fixed_timestep`); `max_torque = 0` or disabled => bounds [0,0]. Target is first clamped into the rate interval the enabled limit rows admit (`[-bias_lower, +bias_upper]`, the **physical** limit biases: a violated limit contributes 0), so motor and limits never push against each other and the motor never drives further into a violated limit. The motor row has no split channel.
 - Momentum: all rows except the anchor rows are pure equal-and-opposite angular impulses; anchor rows change total angular momentum about the origin by `C x lambda`. The split pose correction adds the term described in "Stabilization: split impulses".
 
+## Prismatic joint (`PrismaticJointConstraint`)
+Generic slider: one free relative translation along the joint axis, five constrained DOF (2 lateral translations, 3 rotations), optional finite travel limits. Full row layout in the header of `prismatic_joint_constraint.gd`.
+- **Frame data per body, local:** anchor (a point of the axis line), unit axis, unit reference direction perpendicular to the axis (fixes the twist). `PrismaticJointConstraint.from_world(a, b, anchor, axis, reference)` makes the current pose the reference configuration (both anchors are the same world point, aligned axes, zero twist, translation 0). Input is validated, never repaired (unit length / perpendicularity within 1e-6; valid input is re-normalized exactly; limits finite, `lower <= upper` when enabled; bodies different, not both static).
+- **World frame (A):** `a = R_a*axis_a`, `p = R_a*ref_a`, `q = a x p`; `b = R_b*axis_b`, `w = R_b*ref_b`; `d = (x_b + r_b) - (x_a + r_a)`.
+- **Translation coordinate** `s = d.a` (m): signed displacement of B's anchor from A's anchor along A's axis; positive along `+a`; 0 at the reference configuration. Rate `s_dot = a.d_dot + d.(w_a x a)` (the axis turns with A), `translation_rate()`.
+- **Lateral rows (2):** `C = d.e`, `e in {p, q}` (the anchor offset perpendicular to the axis, in A's moving frame). `Jv_a = -e`, `Jw_a = -((r_a + d) x e)`, `Jv_b = +e`, `Jw_b = r_b x e`. The `d x e` part of `Jw_a` is the effect of A turning the frame while the anchors are axially apart; it is not zero for `s != 0` (checked against central finite differences). Physical bias 0, split bias `(beta/dt) C` (bilateral). `Jv.a = 0`: the rows never act along the axis.
+- **Axis rows (2) and twist row (1):** `C = p.b`, `C = q.b` as for the hinge; `C_t = w.q` (sine of the twist about the axis), `Jw_b = w x q (= +a)`, `Jw_a = q x w (= -a)`, `Jv = 0`; physical bias 0, split `(beta/dt) C`. Together the three rotational rows fix all three relative rotations. Like the hinge, anti-parallel axes or a twist of pi also satisfy the sine-type rows, so only joints that start satisfied are meaningful.
+- **Limits (unilateral, impulse in [0, +inf)):** lower `C = s - lower`, row `Jv_b = +a, Jw_b = r_b x a, Jv_a = -a, Jw_a = -((r_a + d) x a)` (`Cdot = s_dot`); upper `C = upper - s`, the negated row. Physical bias `C/dt` while `C >= 0` (speculative: engages only if the coordinate would cross the limit within this step, not a correction) and 0 when violated (`Cdot >= 0`: no further outward motion); a violated limit is corrected by the split channel only (`(beta/dt) C`, negative, bounds `[0, +inf)`), so no physical velocity is injected and no kinetic energy is created. Disabled limits: bounds [0, 0], the axis is free, and no row has an axial component.
+- **Impulse signs:** `lower_limit_impulse() >= 0` acts along `+a` on B (and `-a` on A); `upper_limit_impulse() >= 0` acts along `-a` on B (and `+a` on A).
+- **Momentum:** all rows have `Jv_a = -Jv_b`; the constraint never changes a body's COM velocity along the axis, so with equal and opposite axial impulses the relative axial COM velocity changes by exactly `J (1/m_a + 1/m_b)` (test identity). The split pose correction adds the terms described in \"Stabilization: split impulses\". Rows are linearized once per step (frozen Jacobian).
+
+## Front suspension spring-damper (`FrontSuspension`)
+A linear spring and linear viscous damper along the axis of the fork's prismatic joint, between body A (steering assembly) and body B (fork slider).
+- **Axis and coordinate.** `u` = the joint's world axis (`world_axis_a()`), pointing from the steering assembly toward the slider (down the fork), so a positive displacement is **extension**. Spring seats `p_a` (fixed point of A) and `p_b` (fixed point of B), configured as world points at the reference pose; they must lie on one line parallel to `u` (validated, not repaired). `l = (p_b - p_a).u`, `l0` = its value at the reference pose, **displacement** `x = l - l0` (m); for a satisfied joint `x` equals the prismatic coordinate `s`. **Rest displacement** `x_rest` (m, explicit): the spring is unloaded at `x = x_rest`. **Relative velocity** `v = u.(v(p_b) - v(p_a))`, `v(p) = v_com + w x (p - x_com)` (m/s; positive while extending); it is the rate conjugate to the force pair, so the damping power is exactly `-c v^2`.
+- **Law.** `F = -k (x - x_rest) - c v`, `k >= 0` N/m, `c >= 0` N s/m (finite; zero allowed), `F` in N. **Sign convention:** `F` is the scalar force on B along `+u` and on A along `-u`: force on B `= +F u` at `p_b`, force on A `= -F u` at `p_a`. Restoring: `x > x_rest` gives `F < 0` (B is pulled back toward A, compressing), `x < x_rest` gives `F > 0`; the damping force `-c v u` opposes the relative axial motion in both directions.
+- **Torque.** The forces are applied AT the seats (`apply_force_at_point`), so each body also receives `tau = (p - x_com) x F` about its COM (non-zero because the COMs are off the line of action). With the seats collinear along `u` the pair is central: net force 0 and net torque about every point 0, so total linear and angular momentum are unchanged by the suspension.
+- **Directions.** The force has no component perpendicular to `u`; it never acts along the five directions the prismatic joint constrains (the joint's rows resist the motion the off-COM torque causes).
+- **Timing.** Evaluated once per fixed step from the start-of-step state by `SimWorld` (force provider), never at the render rate.
+- **Energy.** Spring energy `U = 1/2 k (x - x_rest)^2` (J); damping power `-c v^2 <= 0` (W). The provider never edits poses or velocities. Discretely (a single oscillator, mass `mu`, `w = sqrt(k/mu)`, `h = dt`) the update `v' = v - h (k (x - x_rest) + c v)/mu`, `x' = x + h v'` is symplectic Euler with explicit damping: for `c = 0` the quantity `v^2 + w^2 x^2 - w^2 h x v` is conserved exactly, so for a release from rest the energy stays within `E0/(1 + w h/2) <= E <= E0/(1 - w h/2)` (bounded oscillation, no secular growth, no creation, for `w h < 2`); explicit damping dissipates for `c h/mu < 2`. The frequency of the discrete oscillator is shifted by about `(w h)^2/24`. These are time-step conditions on `k` and `c` (the prototype: `w h` about 0.22, `c h/mu` about 0.2); the code neither checks nor corrects them. In a coupled assembly `mu` is an effective mass that can be much smaller than the two-body value, and a first step that starts from artificially injected, constraint-inconsistent velocities sees larger relative velocities than a settled system (observed ~3x on the first damping step of the prototype after hand-applied impulses).
+
 ## Contact (`ContactConstraint`)
 One-point contact between two bodies; the caller supplies the geometry and creates, refreshes and removes the constraint (no collision detection exists).
 Several contact points are several independent constraints.
@@ -137,6 +158,9 @@ Position error (constraint drift, contact penetration, a violated hinge limit) i
   | Violated hinge limit (`C < 0`) | split (`b_s = (beta/dt) C`, bounds `[0, +inf)`); physical bias 0 |
   | Penetrating contact (`g < 0`) | split (`b_s = (beta/dt) g`, bounds `[0, +inf)`); physical bias 0 |
   | Speculative contact (`g >= 0`), speculative hinge limit (`C >= 0`) | physical (`bias = C/dt`); split row inactive |
+  | Prismatic lateral, axis-alignment and twist error | split (`b_s = (beta/dt) C`, bilateral); physical `Cdot = 0` |
+  | Violated prismatic limit (`C < 0`) | split (`b_s = (beta/dt) C`, bounds `[0, +inf)`); physical bias 0 |
+  | Speculative prismatic limit (`C >= 0`) | physical (`bias = C/dt`); split row inactive |
   | Hinge motor, contact friction, contact normal impulse against approach, gravity, forces | physical only |
 
 - **Position integration.** `x' = x + dt (v + v_s)`, `q' = exp(dt (w + w_s)/2) q` (world-frame increment applied as `dq * q`, then normalized, exactly as before; a body with `v_s = w_s = 0` reproduces the previous update bit for bit). Nothing is teleported and no anchor is overwritten.
