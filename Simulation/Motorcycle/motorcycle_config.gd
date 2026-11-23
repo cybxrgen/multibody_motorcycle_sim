@@ -1,6 +1,6 @@
 extends RefCounted
-## Typed, scene-tree-independent configuration of the motorcycle assembly (M2.1 rigid assembly, M2.2 front telescopic fork):
-## six rigid bodies, four hinges, one prismatic joint and the front spring-damper. Plain data plus validate(); the builder
+## Typed, scene-tree-independent configuration of the motorcycle assembly (M2.1 rigid assembly, M2.2 front telescopic fork,
+## M2.3 rear suspension): six rigid bodies, four hinges, one prismatic joint, the front spring-damper and the rear spring-damper. Plain data plus validate(); the builder
 ## (motorcycle_builder.gd) turns it into a simulation.
 ##
 ## Body graph (joint between A and B, A listed first):
@@ -10,6 +10,8 @@ extends RefCounted
 ##   chassis --swingarm_pivot (hinge)--> swingarm
 ##   swingarm --rear_axle (hinge)--> rear_wheel
 ## The front spring-damper acts between steering and fork_slider along the fork axis (`front_suspension`).
+## The rear spring-damper acts directly between chassis and swingarm along the line joining its two attachment points
+## (`rear_suspension`); it adds no body and no joint.
 ##
 ## All geometry is given ONCE, in world coordinates at the reference pose (every hinge angle and the fork displacement zero):
 ## body COM positions and orientations, and for every joint a point and an axis. Local anchors, local axes and the reference
@@ -22,6 +24,8 @@ extends RefCounted
 const BodySpec = preload("res://Simulation/Motorcycle/motorcycle_body_spec.gd")
 const JointSpec = preload("res://Simulation/Motorcycle/motorcycle_joint_spec.gd")
 const SuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_suspension_spec.gd")
+const RearSuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_rear_suspension_spec.gd")
+const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
 
@@ -56,6 +60,8 @@ var rear_axle: JointSpec = JointSpec.new("rear_axle")
 ## slider (down the fork), so a positive coordinate is extension. It must be (anti)parallel to the steering-head axis (rake).
 var fork_travel: JointSpec = JointSpec.new("fork_travel")
 var front_suspension: SuspensionSpec = SuspensionSpec.new()
+## The rear spring-damper between `chassis` and `swingarm` (two world attachment points, k, c, rest length).
+var rear_suspension: RearSuspensionSpec = RearSuspensionSpec.new()
 
 ## Wheel proxy / geometry dimensions (m). Used by presentation and by wheel_inertia() in fixtures; the physical
 ## quantity is `local_inertia` of the wheel body spec.
@@ -137,6 +143,7 @@ func validate() -> PackedStringArray:
 	_check_wheel_axle(errors, front_wheel, front_axle)
 	_check_wheel_axle(errors, rear_wheel, rear_axle)
 	_check_fork(errors)
+	_check_rear_suspension(errors)
 	return errors
 
 
@@ -195,3 +202,23 @@ func _check_fork(errors: PackedStringArray) -> void:
 		errors.append("front suspension: travel limits must be finite (lower %s, upper %s)" % [spec.lower_travel_limit, spec.upper_travel_limit])
 	elif spec.travel_limits_enabled and not (spec.lower_travel_limit <= 0.0 and 0.0 <= spec.upper_travel_limit):
 		errors.append("front suspension: with travel limits enabled, lower <= 0 <= upper is required so the reference pose lies inside the travel (lower %s, upper %s)" % [spec.lower_travel_limit, spec.upper_travel_limit])
+
+
+## Rear spring-damper rules (single home of the rules; RearSuspension.validate() repeats them on the built object).
+func _check_rear_suspension(errors: PackedStringArray) -> void:
+	var spec: RearSuspensionSpec = rear_suspension
+	if spec == null:
+		errors.append("rear suspension spec is null")
+		return
+	if not (spec.chassis_attachment.is_finite() and spec.swingarm_attachment.is_finite()):
+		errors.append("rear suspension: attachment points must be finite")
+	else:
+		var separation: float = (spec.swingarm_attachment - spec.chassis_attachment).length()
+		if not (separation >= RearSuspension.MIN_LENGTH):
+			errors.append("rear suspension: the attachment points are %s m apart (< %s m): the shock direction is undefined" % [separation, RearSuspension.MIN_LENGTH])
+	if not (is_finite(spec.stiffness) and spec.stiffness >= 0.0):
+		errors.append("rear suspension: stiffness must be finite and >= 0 N/m (got %s)" % spec.stiffness)
+	if not (is_finite(spec.damping) and spec.damping >= 0.0):
+		errors.append("rear suspension: damping must be finite and >= 0 N s/m (got %s)" % spec.damping)
+	if not (is_finite(spec.rest_length) and spec.rest_length > 0.0):
+		errors.append("rear suspension: rest length must be finite and > 0 m (got %s)" % spec.rest_length)

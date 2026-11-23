@@ -66,8 +66,15 @@ class FailingWorld extends "res://Simulation/Core/sim_world.gd":
 
 # --- Builders and helpers ---
 
+## M2.3: the rear spring-damper is zeroed here (k = c = 0, a valid limiting case: the provider stays registered and applies exactly
+## zero force). These M2.1 tests isolate the hinges' degrees of freedom and the rigid graph; a shock between chassis and swingarm is
+## a force coupling across the swingarm hinge and would legitimately carry part of the axial torque, so it is covered in
+## test_rear_suspension.gd and test_motorcycle_rear_suspension.gd instead.
 func _config() -> MotorcycleConfig:
-	return MotorcyclePrototype.config()
+	var c: MotorcycleConfig = MotorcyclePrototype.config()
+	c.rear_suspension.stiffness = 0.0
+	c.rear_suspension.damping = 0.0
+	return c
 
 
 ## Zero-gravity world, converged solver, prototype assembly. Null (after recording a failure) if construction fails.
@@ -365,7 +372,7 @@ func test_a8_registration_failure_rolls_back_every_partial_registration() -> voi
 		w.fail_body_call = -1
 		w.fail_constraint_call = -1
 		var retry: MotorcycleAssembly = MotorcycleBuilder.build(_config(), w)
-		check(retry != null and w.bodies.size() == 7 and w.constraints.size() == 5 and w.force_providers.size() == 1, "%s refused: a retry on the same world succeeds completely" % f[2])
+		check(retry != null and w.bodies.size() == 7 and w.constraints.size() == 5 and w.force_providers.size() == 2, "%s refused: a retry on the same world succeeds completely" % f[2])
 		if retry != null:
 			check(w.step(), "%s refused: the retried assembly steps" % f[2])
 
