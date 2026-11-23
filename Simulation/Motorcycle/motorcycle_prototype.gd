@@ -6,7 +6,7 @@ extends RefCounted
 ## tilted swingarm so that the bodies do not share local frames). Do not read them as the specification of any real
 ## motorcycle, and do not tune the simulation against them. Every value can be changed in the returned MotorcycleConfig.
 ##
-## Reference pose (all hinge angles zero), world frame, +Y up, local -Z forward, +X right, ground plane (not simulated) at y = 0:
+## Reference pose (all hinge angles zero), world frame, +Y up, local -Z forward, +X right, flat ground plane at y = 0 (simulated only by config_with_ground(), M2.4.1):
 ##   * Everything lies in the symmetry plane x = 0. The motorcycle points toward -Z (front wheel at negative z).
 ##   * Steering axis: raked by RAKE from the vertical, leaning rearward toward the top: a = (0, cos RAKE, sin RAKE).
 ##     Positive steering-hinge angle = right-handed about +a = steering to the LEFT (front of the fork toward -X).
@@ -37,6 +37,7 @@ extends RefCounted
 const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.gd")
 const BodySpec = preload("res://Simulation/Motorcycle/motorcycle_body_spec.gd")
 const JointSpec = preload("res://Simulation/Motorcycle/motorcycle_joint_spec.gd")
+const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 
 ## Steering-axis rake from the vertical (degrees).
@@ -45,7 +46,19 @@ const RAKE_DEGREES: float = 26.0
 const WHEEL_INNER_FRACTION: float = 0.75
 
 
-## A fresh, independent configuration each call (callers may mutate it).
+## Illustrative Coulomb friction coefficient of the prototype ground (M2.4.1; not a tyre model, not calibrated).
+const GROUND_FRICTION: float = 0.8
+
+
+## The prototype configuration with the flat ground plane y = 0 (normal +Y) and its two wheel contacts (M2.4.1). The reference pose
+## has the rear wheel exactly touching the plane and the front wheel about 3 mm above it. A fresh configuration each call.
+static func config_with_ground() -> MotorcycleConfig:
+	var c: MotorcycleConfig = config()
+	c.ground = GroundSpec.new(Vector3.ZERO, Vector3.UP, GROUND_FRICTION)
+	return c
+
+
+## A fresh, independent configuration each call (callers may mutate it). It has no ground (see config_with_ground()).
 static func config() -> MotorcycleConfig:
 	var c: MotorcycleConfig = MotorcycleConfig.new()
 	var rake: float = deg_to_rad(RAKE_DEGREES)

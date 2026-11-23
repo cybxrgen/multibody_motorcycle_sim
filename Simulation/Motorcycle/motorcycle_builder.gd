@@ -28,6 +28,7 @@ const FrontSuspension = preload("res://Simulation/Motorcycle/front_suspension.gd
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.gd")
 const MotorcycleAssembly = preload("res://Simulation/Motorcycle/motorcycle_assembly.gd")
+const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 
 ## Construction self-check: world anchors of a hinge must agree within this distance. Pivot coordinates of order 1 m carry
 ## float32 rounding of ~1e-7 m per operation (local = R^-1 (P - x), world = x + R local: a few operations), so honest
@@ -136,6 +137,28 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 		return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the rear suspension")
 	added_providers.append(rear_suspension)
 	assembly.rear_suspension = rear_suspension
+
+	# 3c. Optional ground (M2.4.1): one static body and one WheelGroundContact per wheel (ground = body A, wheel = body B).
+	if config.ground != null:
+		var ground_spec = config.ground
+		var ground_body: SimRigidBody = SimRigidBody.new(SimMassProperties.new(0.0), ground_spec.point, Quaternion.IDENTITY)
+		ground_body.body_name = "ground"
+		if target.add_body(ground_body) == null:
+			return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the ground body")
+		added_bodies.append(ground_body)
+		assembly.ground = ground_body
+		var wheel_links: Array = [[assembly.front_wheel, config.front_wheel_radius, "front"], [assembly.rear_wheel, config.rear_wheel_radius, "rear"]]
+		var contacts: Array = []
+		for link in wheel_links:
+			var contact = WheelGroundContact.create(ground_body, link[0], link[1], ground_spec.point, ground_spec.normal, ground_spec.friction, ground_spec.activation_distance)
+			if contact == null:
+				return _fail(target, added_bodies, added_constraints, added_providers, "the %s wheel ground contact could not be created" % link[2])
+			if target.add_constraint(contact) == null:
+				return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the %s wheel ground contact" % link[2])
+			added_constraints.append(contact)
+			contacts.append(contact)
+		assembly.front_wheel_contact = contacts[0]
+		assembly.rear_wheel_contact = contacts[1]
 
 	# 4. Self-check of the construction contract (coincident anchors, aligned axes).
 	var contract_error: String = construction_error(assembly)

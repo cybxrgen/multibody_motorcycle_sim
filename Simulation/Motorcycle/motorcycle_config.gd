@@ -25,6 +25,8 @@ const BodySpec = preload("res://Simulation/Motorcycle/motorcycle_body_spec.gd")
 const JointSpec = preload("res://Simulation/Motorcycle/motorcycle_joint_spec.gd")
 const SuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_suspension_spec.gd")
 const RearSuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_rear_suspension_spec.gd")
+const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
+const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
@@ -62,6 +64,10 @@ var fork_travel: JointSpec = JointSpec.new("fork_travel")
 var front_suspension: SuspensionSpec = SuspensionSpec.new()
 ## The rear spring-damper between `chassis` and `swingarm` (two world attachment points, k, c, rest length).
 var rear_suspension: RearSuspensionSpec = RearSuspensionSpec.new()
+
+## Optional flat static ground plane (M2.4.1). null (the default) builds no ground and no wheel contact, exactly the M2.1-M2.3 assembly.
+## When set, the builder adds one static ground body and one WheelGroundContact per wheel.
+var ground: GroundSpec = null
 
 ## Wheel proxy / geometry dimensions (m). Used by presentation and by wheel_inertia() in fixtures; the physical
 ## quantity is `local_inertia` of the wheel body spec.
@@ -144,6 +150,7 @@ func validate() -> PackedStringArray:
 	_check_wheel_axle(errors, rear_wheel, rear_axle)
 	_check_fork(errors)
 	_check_rear_suspension(errors)
+	_check_ground(errors)
 	return errors
 
 
@@ -225,3 +232,28 @@ func _check_rear_suspension(errors: PackedStringArray) -> void:
 		errors.append("rear suspension: damping must be finite and >= 0 N s/m (got %s)" % spec.damping)
 	if not (is_finite(spec.rest_length) and spec.rest_length > 0.0):
 		errors.append("rear suspension: rest length must be finite and > 0 m (got %s)" % spec.rest_length)
+
+
+## Ground plane rules (only when a ground is configured): finite point, finite unit normal, finite friction >= 0, finite
+## activation distance >= 0, and a non-degenerate wheel/normal geometry at the reference pose (WheelGroundContact.MIN_PLANE_PROJECTION).
+func _check_ground(errors: PackedStringArray) -> void:
+	if ground == null:
+		return
+	if not ground.point.is_finite():
+		errors.append("ground: point must be finite (got %s)" % ground.point)
+	if not ground.normal.is_finite():
+		errors.append("ground: normal must be finite (got %s)" % ground.normal)
+	elif absf(ground.normal.length() - 1.0) > AXIS_UNIT_TOLERANCE:
+		errors.append("ground: normal must be a unit vector (length %s)" % ground.normal.length())
+	if not (is_finite(ground.friction) and ground.friction >= 0.0):
+		errors.append("ground: friction must be finite and >= 0 (got %s)" % ground.friction)
+	if not (is_finite(ground.activation_distance) and ground.activation_distance >= 0.0):
+		errors.append("ground: activation distance must be finite and >= 0 (got %s)" % ground.activation_distance)
+	if ground.normal.is_finite() and ground.normal.length() > 0.5:
+		for pair in [[front_wheel, front_wheel_radius, "front wheel"], [rear_wheel, rear_wheel_radius, "rear wheel"]]:
+			var spec: BodySpec = pair[0]
+			if spec == null or not spec.orientation.is_finite() or spec.orientation.length() < 0.5:
+				continue
+			var geometry: Dictionary = WheelGroundContact.compute_geometry(spec.position, spec.orientation.normalized(), 1.0, Vector3.ZERO, ground.normal.normalized())
+			if not geometry.valid and "degenerate" in geometry.reason:
+				errors.append("ground: the %s axle is nearly parallel to the ground normal at the reference pose (%s)" % [pair[2], geometry.reason])
