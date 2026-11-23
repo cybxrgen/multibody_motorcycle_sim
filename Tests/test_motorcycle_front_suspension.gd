@@ -77,8 +77,13 @@ class FailingWorld extends "res://Simulation/Core/sim_world.gd":
 		return super(provider)
 
 
+## M2.3: the rear spring-damper is zeroed here (k = c = 0: registered, exactly zero force) so these M2.2 tests keep isolating the
+## front suspension and the M2.1 rear behaviour; the sprung rear coexisting with the front is in test_motorcycle_rear_suspension.gd.
 func _config() -> MotorcycleConfig:
-	return MotorcyclePrototype.config()
+	var c: MotorcycleConfig = MotorcyclePrototype.config()
+	c.rear_suspension.stiffness = 0.0
+	c.rear_suspension.damping = 0.0
+	return c
 
 
 func _build(gravity: Vector3 = Vector3.ZERO, config: MotorcycleConfig = null, iterations: int = ITERATIONS) -> MotorcycleAssembly:
@@ -124,7 +129,7 @@ func test_e1_six_bodies_five_joints_one_suspension_and_named_references() -> voi
 	var w: SimWorld = a.world
 	check(w.bodies.size() == 6 and a.bodies().size() == 6, "six bodies")
 	check(w.constraints.size() == 5 and a.constraints().size() == 5, "five constraints")
-	check(w.force_providers.size() == 1 and w.force_providers[0] == a.front_suspension, "one registered force provider: the front suspension")
+	check(w.force_providers.size() == 2 and w.force_providers[0] == a.front_suspension and w.force_providers[1] == a.rear_suspension, "two registered force providers: the front suspension, then the rear suspension")
 	var hinge_count: int = 0
 	var prismatic_count: int = 0
 	for c in w.constraints:
@@ -417,6 +422,7 @@ func test_e11_builder_is_transactional_for_every_registration_stage_and_every_in
 	for n in range(1, 6):
 		stages.append([-1, n, -1, "add_constraint #%d" % n])
 	stages.append([-1, -1, 1, "add_force_provider #1"])
+	stages.append([-1, -1, 2, "add_force_provider #2 (rear suspension, M2.3)"])
 	for st in stages:
 		var w: FailingWorld = FailingWorld.new()
 		w.config.gravity = Vector3.ZERO
@@ -434,7 +440,7 @@ func test_e11_builder_is_transactional_for_every_registration_stage_and_every_in
 		w.fail_constraint_call = -1
 		w.fail_provider_call = -1
 		var retry: MotorcycleAssembly = MotorcycleBuilder.build(_config(), w)
-		check(retry != null and w.bodies.size() == 7 and w.constraints.size() == 5 and w.force_providers.size() == 1, "%s refused: a retry succeeds completely" % st[3])
+		check(retry != null and w.bodies.size() == 7 and w.constraints.size() == 5 and w.force_providers.size() == 2, "%s refused: a retry succeeds completely" % st[3])
 		if retry != null:
 			check(w.step(), "%s refused: the retried assembly steps" % st[3])
 	# Invalid configurations are rejected before anything is registered, in a populated world, and a valid build follows.

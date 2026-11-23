@@ -27,6 +27,12 @@ extends RefCounted
 ##                                                                 -> MotorcycleConfig.wheel_inertia (axle = local X)
 ## Front suspension (illustrative, NOT calibrated): spring seats on the fork axis, k = 12 kN/m, c = 400 N s/m, rest displacement
 ## 0 (unloaded at the reference pose), travel limits 0.12 m compression / 0.03 m extension from the reference pose.
+## Rear suspension (M2.3, illustrative, NOT calibrated): a direct spring-damper from a chassis point (0, 0.80, 0.22) to a swingarm
+## point (0, 0.40, 0.58) behind and below it, so the shock is inclined (neither vertical nor along a body axis) and its direction
+## changes as the swingarm rotates; k = 30 kN/m, c = 1200 N s/m, rest length = the attachment distance at the reference pose
+## (unloaded there; no preload or sag, like the front). With the shock's lever arm about the swingarm pivot (~0.21 m) this is a
+## torsional stiffness of ~1.3 kN m/rad (about 0.4 damping ratio against the swingarm-plus-wheel inertia); the numbers are a
+## plausible order of magnitude for a demonstration, not a claim about any motorcycle.
 
 const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.gd")
 const BodySpec = preload("res://Simulation/Motorcycle/motorcycle_body_spec.gd")
@@ -108,4 +114,11 @@ static func config() -> MotorcycleConfig:
 	c.front_suspension.travel_limits_enabled = true
 	c.front_suspension.lower_travel_limit = -0.12
 	c.front_suspension.upper_travel_limit = 0.03
+
+	# Rear suspension: direct spring-damper between a chassis point and a swingarm point; rest length = reference length.
+	c.rear_suspension.chassis_attachment = Vector3(0.0, 0.80, 0.22)
+	c.rear_suspension.swingarm_attachment = Vector3(0.0, 0.40, 0.58)
+	c.rear_suspension.stiffness = 30000.0
+	c.rear_suspension.damping = 1200.0
+	c.rear_suspension.rest_length = (c.rear_suspension.swingarm_attachment - c.rear_suspension.chassis_attachment).length()
 	return c

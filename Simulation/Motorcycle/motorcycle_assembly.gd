@@ -1,7 +1,7 @@
 extends RefCounted
 ## Result of MotorcycleBuilder.build(): the world and NAMED references to the six bodies, the four hinges, the fork's prismatic
-## joint and the front suspension, so tests and presentation never index arrays or rely on body ids. A successfully built
-## assembly is complete: it is only ever constructed with all six bodies, all five joints and the suspension registered in `world`.
+## joint, the front suspension and the rear suspension, so tests and presentation never index arrays or rely on body ids. A successfully built
+## assembly is complete: it is only ever constructed with all six bodies, all five joints and both suspensions registered in `world`.
 ## Owns nothing physical: the bodies, constraints and the force provider belong to `world` (SimWorld owns all physical state).
 
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
@@ -9,6 +9,7 @@ const SimRigidBody = preload("res://Simulation/Core/sim_rigid_body.gd")
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
 const PrismaticJoint = preload("res://Simulation/Solver/prismatic_joint_constraint.gd")
 const FrontSuspension = preload("res://Simulation/Motorcycle/front_suspension.gd")
+const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 
 var world: SimWorld
 ## The configuration the assembly was built from (kept for geometry queries; not re-read by the simulation).
@@ -37,6 +38,8 @@ var rear_axle_joint: HingeJoint
 var fork_joint: PrismaticJoint
 ## The front spring-damper (a SimForceProvider registered in `world`) between steering and fork slider.
 var front_suspension: FrontSuspension
+## The rear spring-damper (a SimForceProvider registered in `world`) between chassis and swingarm.
+var rear_suspension: RearSuspension
 
 
 ## The six bodies: chassis, steering, fork slider, swingarm, front wheel, rear wheel.
@@ -52,6 +55,11 @@ func joints() -> Array:
 ## All five constraints in registration order: the four hinges, then the fork's prismatic joint.
 func constraints() -> Array:
 	return [steering_joint, swingarm_joint, front_axle_joint, rear_axle_joint, fork_joint]
+
+
+## The two force providers in registration order: front suspension, rear suspension.
+func force_providers() -> Array:
+	return [front_suspension, rear_suspension]
 
 
 func total_mass() -> float:

@@ -1,8 +1,8 @@
 extends RefCounted
 ## Builds the motorcycle assembly from a MotorcycleConfig: six independent dynamic rigid bodies (chassis, steering assembly,
 ## fork slider, swingarm, front wheel, rear wheel) registered in a SimWorld, four generic HingeJointConstraints, one generic
-## PrismaticJointConstraint (steering assembly <-> fork slider, along the fork axis) and the front spring-damper registered as a
-## generic force provider. Static functions only; scene-tree independent; no motorcycle-specific behaviour exists in
+## PrismaticJointConstraint (steering assembly <-> fork slider, along the fork axis), the front spring-damper and the rear
+## spring-damper (chassis <-> swingarm, a direct force pair, no extra body or joint), both registered as generic force providers. Static functions only; scene-tree independent; no motorcycle-specific behaviour exists in
 ## Simulation/Core or Simulation/Solver.
 ##
 ## Joint frames are NOT typed in per body. Each hinge is created with HingeJointConstraint.from_world(a, b, point, axis,
@@ -25,6 +25,7 @@ const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd"
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
 const PrismaticJoint = preload("res://Simulation/Solver/prismatic_joint_constraint.gd")
 const FrontSuspension = preload("res://Simulation/Motorcycle/front_suspension.gd")
+const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.gd")
 const MotorcycleAssembly = preload("res://Simulation/Motorcycle/motorcycle_assembly.gd")
 
@@ -124,6 +125,17 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 		return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the front suspension")
 	added_providers.append(suspension)
 	assembly.front_suspension = suspension
+
+	# 3b. Rear spring-damper: a force pair between chassis and swingarm at the two attachment points (no body, no joint).
+	var rear_spec = config.rear_suspension
+	var rear_suspension = RearSuspension.from_world(assembly.chassis, assembly.swingarm, rear_spec.chassis_attachment, rear_spec.swingarm_attachment,
+		rear_spec.stiffness, rear_spec.damping, rear_spec.rest_length)
+	if rear_suspension == null:
+		return _fail(target, added_bodies, added_constraints, added_providers, "rear suspension could not be created from the configured attachments and parameters")
+	if target.add_force_provider(rear_suspension) == null:
+		return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the rear suspension")
+	added_providers.append(rear_suspension)
+	assembly.rear_suspension = rear_suspension
 
 	# 4. Self-check of the construction contract (coincident anchors, aligned axes).
 	var contract_error: String = construction_error(assembly)
