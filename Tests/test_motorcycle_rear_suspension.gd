@@ -379,6 +379,23 @@ func test_d1_invalid_rear_configurations_are_rejected_before_any_world_mutation(
 	check(edge.validate().is_empty() and MotorcycleBuilder.build(edge, FailingWorld.new()) != null, "a 2 mm separation with k = c = 0 is valid and builds")
 
 
+func test_d3_an_overflowing_but_finite_attachment_separation_is_rejected_before_any_world_mutation() -> void:
+	var cfg: MotorcycleConfig = _config()
+	check(cfg.validate().is_empty(), "the prototype configuration is valid")
+	# Finite coordinates whose separation length overflows float32 (3e19 squared > 3.4e38).
+	cfg.rear_suspension.swingarm_attachment = Vector3(3.0e19, 0.4, 0.58)
+	var spec = cfg.rear_suspension
+	check(spec.chassis_attachment.is_finite() and spec.swingarm_attachment.is_finite(), "both attachment points are finite")
+	check(not is_finite((spec.swingarm_attachment - spec.chassis_attachment).length()), "yet their separation is not finite")
+	var errors: PackedStringArray = cfg.validate()
+	check(not errors.is_empty() and " ".join(errors).containsn("finite") and " ".join(errors).containsn("rear suspension"), "validate() rejects it (%s)" % "; ".join(errors))
+	var w: FailingWorld = FailingWorld.new()
+	w.config.gravity = Vector3.ZERO
+	check(MotorcycleBuilder.build(cfg, w) == null, "build returns null")
+	check(w.body_calls == 0 and w.constraint_calls == 0 and w.provider_calls == 0 and w.bodies.is_empty() and w.constraints.is_empty() and w.force_providers.is_empty(),
+		"the world was never touched (calls %d/%d/%d)" % [w.body_calls, w.constraint_calls, w.provider_calls])
+
+
 func test_d2_failure_at_rear_provider_registration_rolls_everything_back_and_a_retry_succeeds() -> void:
 	# The existing strategy (FailingWorld refusing the n-th registration) extended to the rear provider (#2) in a populated world.
 	var stages: Array = []

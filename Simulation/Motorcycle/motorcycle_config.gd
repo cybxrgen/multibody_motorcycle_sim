@@ -214,7 +214,10 @@ func _check_rear_suspension(errors: PackedStringArray) -> void:
 		errors.append("rear suspension: attachment points must be finite")
 	else:
 		var separation: float = (spec.swingarm_attachment - spec.chassis_attachment).length()
-		if not (separation >= RearSuspension.MIN_LENGTH):
+		# Finite coordinates can still overflow the length computation (float32): +INF >= MIN_LENGTH is true, so finiteness is checked first.
+		if not is_finite(separation):
+			errors.append("rear suspension: the attachment separation is not finite (%s m): the shock direction is undefined" % separation)
+		elif separation < RearSuspension.MIN_LENGTH:
 			errors.append("rear suspension: the attachment points are %s m apart (< %s m): the shock direction is undefined" % [separation, RearSuspension.MIN_LENGTH])
 	if not (is_finite(spec.stiffness) and spec.stiffness >= 0.0):
 		errors.append("rear suspension: stiffness must be finite and >= 0 N/m (got %s)" % spec.stiffness)

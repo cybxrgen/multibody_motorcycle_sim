@@ -26,7 +26,7 @@ extends "res://Simulation/Core/sim_force_provider.gd"
 ##   map as the front suspension, with the same time-step stability condition on k and c (PHYSICS_CONVENTIONS.md, "Rear
 ##   suspension spring-damper"); that condition is not a hidden correction and is not checked at run time.
 ## ---- Degenerate geometry ----
-##   n is undefined for l -> 0. The provider refuses l < MIN_LENGTH: validate() reports it (so add_force_provider and the world's
+##   n is undefined for l -> 0. The provider refuses l < MIN_LENGTH and a non-finite l (finite points can overflow it): validate() reports it (so add_force_provider and the world's
 ##   preflight refuse it; nothing is clamped or repaired), and direction() / the force queries return zero and apply_forces()
 ##   applies nothing there, so a non-finite direction or force can never be produced.
 
@@ -103,9 +103,11 @@ func validate() -> PackedStringArray:
 	if not (is_finite(rest_length) and rest_length > 0.0):
 		errors.append("rear suspension rest length must be finite and > 0 m (got %s)" % rest_length)
 	if attachments_finite:
-		# Current geometry. A non-finite length (corrupt body pose) is left to the world's own pose validation.
+		# Current geometry. Finite points can still give a non-finite length (float32 overflow, or a corrupt pose): never accepted.
 		var separation: float = length()
-		if is_finite(separation) and separation < MIN_LENGTH:
+		if not is_finite(separation):
+			errors.append("rear suspension attachment separation is not finite (%s m): the shock direction is undefined" % separation)
+		elif separation < MIN_LENGTH:
 			errors.append("rear suspension attachment points are %s m apart (< %s m): the shock direction is undefined" % [separation, MIN_LENGTH])
 	return errors
 
@@ -125,16 +127,17 @@ func length() -> float:
 	return (attachment_swingarm_world() - attachment_chassis_world()).length()
 
 
-## True while the geometry defines a direction (l >= MIN_LENGTH; false for non-finite poses too).
+## True while the geometry defines a direction (l finite and >= MIN_LENGTH; false for a non-finite length, e.g. overflow or a non-finite pose).
 func has_direction() -> bool:
-	return length() >= MIN_LENGTH
+	var l: float = length()
+	return is_finite(l) and l >= MIN_LENGTH
 
 
-## Unit vector n from the chassis attachment toward the swingarm attachment; Vector3.ZERO where it is undefined (l < MIN_LENGTH).
+## Unit vector n from the chassis attachment toward the swingarm attachment; Vector3.ZERO where it is undefined (l non-finite or < MIN_LENGTH).
 func direction() -> Vector3:
 	var d: Vector3 = attachment_swingarm_world() - attachment_chassis_world()
 	var l: float = d.length()
-	if not (l >= MIN_LENGTH):
+	if not (is_finite(l) and l >= MIN_LENGTH):
 		return Vector3.ZERO
 	return d / l
 

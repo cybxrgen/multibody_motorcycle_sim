@@ -739,6 +739,61 @@ func test_c2_degenerate_geometry_never_yields_a_non_finite_direction_or_force() 
 	check(r3.sb.force_accumulator == Vector3.ZERO and r3.cb.force_accumulator == Vector3.ZERO, "a non-finite pose yields no force from the component")
 
 
+## Finite coordinate whose square (9e38) exceeds the float32 maximum (~3.4e38): a separation built from it is finite per component
+## but its length() overflows to +INF. +INF >= MIN_LENGTH is true, so a bare lower-bound comparison would accept it.
+const OVERFLOW_COORD: float = 3.0e19
+
+
+## Two bodies with finite data whose attachment separation overflows. kind "local": finite local attachment points; kind "pose":
+## a finite body position with zero local points. Returns {world, cb, sb, susp}.
+func _overflow_pair(kind: String) -> Dictionary:
+	var w: SimWorld = make_world()
+	var cb: SimRigidBody = make_sphere(10.0, 0.2, Vector3.ZERO)
+	var sb: SimRigidBody = make_sphere(5.0, 0.2, Vector3(OVERFLOW_COORD, 0.0, 0.0) if kind == "pose" else Vector3.ZERO)
+	w.add_body(cb)
+	w.add_body(sb)
+	var ls: Vector3 = Vector3(OVERFLOW_COORD, 0.0, 0.0) if kind == "local" else Vector3.ZERO
+	var susp = RearSuspension.new(cb, sb, Vector3.ZERO, ls, 1000.0, 10.0, 0.5)
+	return {"world": w, "cb": cb, "sb": sb, "susp": susp}
+
+
+func test_c5_an_overflowing_but_finite_separation_is_rejected_and_defines_no_direction() -> void:
+	for kind in ["local", "pose"]:
+		var r: Dictionary = _overflow_pair(kind)
+		var s = r.susp
+		# The inputs themselves are finite: this exercises the length overflow, not an infinite input.
+		check(s.local_attachment_chassis.is_finite() and s.local_attachment_swingarm.is_finite() and r.cb.position.is_finite() and r.sb.position.is_finite(),
+			"%s: every input coordinate is finite" % kind)
+		check(s.attachment_chassis_world().is_finite() and s.attachment_swingarm_world().is_finite(), "%s: both world attachment points are finite" % kind)
+		check(not is_finite(s.length()), "%s: yet the attachment separation is not finite" % kind)
+		var errors: PackedStringArray = s.validate()
+		check(errors.size() == 1 and "finite" in errors[0], "%s: validate() rejects it once, naming finiteness (%s)" % [kind, "; ".join(errors)])
+		check(not s.has_direction(), "%s: has_direction() is false" % kind)
+		check(s.direction() == Vector3.ZERO, "%s: direction() is exactly zero (not NaN, not a normalized infinity)" % kind)
+		check(is_finite(s.axial_force()) and is_finite(s.relative_extension_rate()) and s.direction().is_finite(), "%s: the queries stay finite" % kind)
+		s.apply_forces(DT, r.world.config)
+		check(r.cb.force_accumulator == Vector3.ZERO and r.sb.force_accumulator == Vector3.ZERO, "%s: apply_forces() applies nothing" % kind)
+		check(r.world.add_force_provider(s) == null and r.world.force_providers.is_empty(), "%s: the world refuses to register it" % kind)
+	# The same pair registered while valid and then moved to the overflow geometry: the world refuses to step, state untouched.
+	var q: Dictionary = _overflow_pair("pose")
+	q.sb.position = Vector3(0.0, 0.0, 0.4)
+	check(q.world.add_force_provider(q.susp) != null and q.world.preflight(), "a valid pair registers")
+	q.sb.position = Vector3(OVERFLOW_COORD, 0.0, 0.0)
+	var before: Vector3 = q.sb.position
+	check(not q.world.step() and q.sb.position == before, "after moving to the overflow geometry the step is refused with the state unchanged")
+
+
+func test_c6_ordinary_finite_geometry_still_validates_and_yields_the_normalized_direction() -> void:
+	var r: Dictionary = _rig()
+	var s = r.susp
+	var o: Dictionary = _oracle(r)
+	check(s.validate().is_empty() and s.is_valid(), "ordinary geometry validates")
+	check(s.has_direction(), "has_direction() is true")
+	check_vec3_near(s.direction(), o.n, 2.0e-6, "direction() equals the independently computed unit vector")
+	check_near(s.direction().length(), 1.0, 2.0e-6, "direction() is a unit vector")
+	check_near(s.length(), o.l, 2.0e-6, "length() equals the independent separation")
+
+
 func test_c3_invalid_or_mutated_providers_are_refused_by_the_preflight_rules() -> void:
 	# Registration of a foreign / null / unregistered-body provider.
 	var r: Dictionary = _rig({"register": false})
