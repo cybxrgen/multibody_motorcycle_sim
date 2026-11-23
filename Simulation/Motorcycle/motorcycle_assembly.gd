@@ -2,6 +2,7 @@ extends RefCounted
 ## Result of MotorcycleBuilder.build(): the world and NAMED references to the six bodies, the four hinges, the fork's prismatic
 ## joint, the front suspension and the rear suspension, so tests and presentation never index arrays or rely on body ids. A successfully built
 ## assembly is complete: it is only ever constructed with all six bodies, all five joints and both suspensions registered in `world`.
+## When the configuration has a ground (M2.4.1) the static ground body and both wheel contacts are registered too.
 ## Owns nothing physical: the bodies, constraints and the force provider belong to `world` (SimWorld owns all physical state).
 
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
@@ -10,6 +11,7 @@ const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
 const PrismaticJoint = preload("res://Simulation/Solver/prismatic_joint_constraint.gd")
 const FrontSuspension = preload("res://Simulation/Motorcycle/front_suspension.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
+const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 
 var world: SimWorld
 ## The configuration the assembly was built from (kept for geometry queries; not re-read by the simulation).
@@ -40,6 +42,12 @@ var fork_joint: PrismaticJoint
 var front_suspension: FrontSuspension
 ## The rear spring-damper (a SimForceProvider registered in `world`) between chassis and swingarm.
 var rear_suspension: RearSuspension
+
+## M2.4.1 ground contact (all null when the configuration has no ground). The ground is a STATIC body registered in `world`; each
+## contact is a WheelGroundContact (body A = ground, body B = the wheel) registered in `world.constraints`.
+var ground: SimRigidBody
+var front_wheel_contact: WheelGroundContact
+var rear_wheel_contact: WheelGroundContact
 
 
 ## The six bodies: chassis, steering, fork slider, swingarm, front wheel, rear wheel.
@@ -89,3 +97,35 @@ func max_axis_error() -> float:
 ## Zero at construction up to float32 rounding. Returns Vector3(lateral m, axis rad, |twist| rad).
 func fork_error() -> Vector3:
 	return Vector3(fork_joint.lateral_error().length(), fork_joint.axis_error_angle(), absf(fork_joint.twist_error_angle()))
+
+
+## True while the ground and both wheel contacts are part of the assembly.
+func has_ground() -> bool:
+	return ground != null and front_wheel_contact != null and rear_wheel_contact != null
+
+
+## The two wheel contacts in the order front, rear (empty without ground).
+func ground_contacts() -> Array:
+	return [front_wheel_contact, rear_wheel_contact] if has_ground() else []
+
+
+## Enables or disables both wheel contacts. Disabling discards their carried impulses (reset_warm_start), so re-enabling starts cold
+## and a disabled contact can never act. Does nothing without a ground.
+func set_ground_contacts_enabled(enabled: bool) -> void:
+	for contact in ground_contacts():
+		contact.enabled = enabled
+		if not enabled:
+			contact.reset_warm_start()
+
+
+## Removes both wheel contacts and the ground body from the world; the six motorcycle bodies, five joints and both suspensions stay.
+## No orphaned constraint or body remains. Does nothing without a ground.
+func remove_ground() -> void:
+	if not has_ground():
+		return
+	for contact in ground_contacts():
+		world.remove_constraint(contact)
+	world.remove_body(ground)
+	front_wheel_contact = null
+	rear_wheel_contact = null
+	ground = null

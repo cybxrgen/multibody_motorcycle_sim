@@ -1,25 +1,28 @@
 extends Node3D
-## M2.1/M2.2 demonstration: the motorcycle assembly (six rigid bodies, four free hinges, the fork's prismatic joint with a
-## spring-damper and finite travel) in ZERO gravity, built by MotorcycleBuilder from the ILLUSTRATIVE prototype parameters (not a
-## real motorcycle). It is not riding: there is no ground, no rear suspension, no tyre and no drive, and the hinges have no limits,
-## so the free parts keep turning and pass through each other. The front fork is a real telescopic suspension: the upper steering
-## assembly (orange) and the lower fork slider (cyan) are separate bodies; the front wheel (red) hangs on the slider and the slider
-## slides along the raked fork axis against the spring-damper and its travel stops.
+## M2.4.1 demonstration: the motorcycle assembly (six rigid bodies, four free hinges, the fork's prismatic joint with a spring-damper
+## and finite travel, the rear spring-damper) under GRAVITY on a flat static ground plane (y = 0), built by MotorcycleBuilder from the
+## ILLUSTRATIVE prototype parameters (not a real motorcycle) with MotorcyclePrototype.config_with_ground(). Each wheel touches the
+## plane through one WheelGroundContact (generic ContactConstraint: unilateral normal impulse, split-impulse penetration correction,
+## Coulomb friction mu = 0.8), re-seated at every fixed step. Nothing is positioned by hand: the scene only advances the world with the
+## fixed-step accumulator and renders PUBLISHED state; it never writes physical state.
 ##
-## Initial conditions (set once at scenario build, exactly as simulation_test.gd sets its spinner's velocity; nothing is applied
-## afterwards): for every hinge an equal and opposite pair of angular impulses about its axis, so total momentum is zero and the
-## assembly does not drift: steering, swingarm and both wheels each get a different relative rotation. One more equal and opposite
-## pair of impulses along the fork axis (steering assembly vs fork slider) makes the fork travel visibly. This script only advances
-## the world with the fixed-step accumulator (like simulation_test.gd) and renders PUBLISHED state; it never writes physical state.
+## NOT a ride and NOT self-balancing: a riderless motorcycle on two narrow point contacts is not stable in roll, and there is no rider,
+## drive, steering control, stand or stabilizer. The scene is exactly symmetric about its x = 0 plane, so no lateral disturbance ever
+## arises and it stays standing in a knife-edge balance; that is NOT stability (a small roll disturbance topples it within seconds, see
+## Tests/test_motorcycle_ground.gd). Suspension sag, loading of the two wheels and the contact lifecycle are what this scene shows.
 ##
-## Colors: chassis blue-grey, steering assembly orange, fork slider cyan, swingarm green, front wheel red, rear wheel yellow; wheels carry a contrasting
-## spoke bar and valve marker so their rotation is visible. Overlay: magenta/cyan crosses are the two anchors of each hinge.
+## Colors: chassis blue-grey, steering assembly orange, fork slider cyan, swingarm green, front wheel red, rear wheel yellow; wheels carry
+## a contrasting spoke bar and valve marker so their rotation is visible; the dark slab is the ground plane. Contact markers (spheres at
+## each wheel's lowest point, derived from the published pose): GREEN = touching (|gap| < 0.1 mm or penetrating), ORANGE = separated.
+## Overlay: magenta/cyan crosses are the two anchors of each constraint (hinges and contacts). The label lists, per wheel, the signed gap,
+## the normal force (last step's normal impulse / dt, read-only) and the contact state.
 ## Keys: Space pause/resume, N single step (paused), R reset, L local axes, C COM markers, J anchors, mouse drag orbit, wheel zoom.
 
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
 const SimBodyState = preload("res://Simulation/Core/sim_body_state.gd")
 const MotorcycleBuilder = preload("res://Simulation/Motorcycle/motorcycle_builder.gd")
 const MotorcyclePrototype = preload("res://Simulation/Motorcycle/motorcycle_prototype.gd")
+const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const SimulationRenderer = preload("res://Simulation/Presentation/simulation_renderer.gd")
 const SimulationDebug = preload("res://Simulation/Debug/simulation_debug.gd")
 
@@ -35,6 +38,7 @@ var _pitch: float = -0.2
 var _distance: float = 3.6
 var _target: Vector3 = Vector3(0.0, 0.6, 0.0)
 var _label: Label = Label.new()
+var _markers: Array = []
 
 
 func _ready() -> void:
@@ -61,9 +65,11 @@ func _ready() -> void:
 
 func _build_scenario() -> void:
 	renderer.clear()
-	world = SimWorld.new()
-	world.config.gravity = Vector3.ZERO
-	var config = MotorcyclePrototype.config()
+	for marker in _markers:
+		marker.queue_free()
+	_markers.clear()
+	world = SimWorld.new()  # default SimConfig: gravity (0, -9.81, 0)
+	var config = MotorcyclePrototype.config_with_ground()
 	assembly = MotorcycleBuilder.build(config, world)
 	if assembly == null:
 		push_error("motorcycle_test: the assembly could not be built.")
@@ -71,23 +77,26 @@ func _build_scenario() -> void:
 	renderer.world = world
 	debug_overlay.world = world
 
-	# Initial relative rotations: equal and opposite angular impulses about each hinge axis (total momentum stays zero).
-	var specs: Array = config.joint_specs()
-	var joints: Array = assembly.joints()
-	var kicks: Array = [1.5, 1.0, config.front_wheel.local_inertia.x.x * -8.0, config.rear_wheel.local_inertia.x.x * -5.0]
-	for k in 4:
-		joints[k].body_b.apply_angular_impulse(specs[k].axis * kicks[k])
-		joints[k].body_a.apply_angular_impulse(specs[k].axis * -kicks[k])
-	# Fork travel: equal and opposite linear impulses along the fork axis on the slider and the steering assembly (zero net momentum).
-	assembly.fork_slider.apply_impulse(config.fork_travel.axis * -25.0)
-	assembly.steering.apply_impulse(config.fork_travel.axis * 25.0)
-
 	renderer.add_box(assembly.chassis, config.chassis.visual_size, Color(0.45, 0.55, 0.75))
 	renderer.add_box(assembly.steering, config.steering.visual_size, Color(0.95, 0.55, 0.15))
 	renderer.add_box(assembly.swingarm, config.swingarm.visual_size, Color(0.3, 0.75, 0.35))
 	renderer.add_box(assembly.fork_slider, config.fork_slider.visual_size, Color(0.25, 0.8, 0.85))
 	_add_wheel(assembly.front_wheel, config.front_wheel_radius, config.front_wheel_width, Color(0.85, 0.2, 0.2))
 	_add_wheel(assembly.rear_wheel, config.rear_wheel_radius, config.rear_wheel_width, Color(0.9, 0.8, 0.2))
+
+	# Ground plane: a thin slab whose TOP face is the plane y = 0 (the ground body's COM frame is on the plane).
+	var slab: BoxMesh = BoxMesh.new()
+	slab.size = Vector3(12.0, 0.02, 12.0)
+	renderer.add_mesh(assembly.ground, slab, Color(0.2, 0.22, 0.25), Transform3D(Basis.IDENTITY, Vector3(0.0, -0.01, 0.0)))
+	for k in 2:
+		var marker: MeshInstance3D = MeshInstance3D.new()
+		var sphere: SphereMesh = SphereMesh.new()
+		sphere.radius = 0.03
+		sphere.height = 0.06
+		marker.mesh = sphere
+		marker.material_override = StandardMaterial3D.new()
+		add_child(marker)
+		_markers.append(marker)
 
 
 ## Wheel proxy: a cylinder with its axis along the body-local X axle, a diametral spoke bar and an off-centre valve marker.
@@ -113,8 +122,48 @@ func _process(delta: float) -> void:
 	var alpha: float = world.interpolation_alpha() if not paused else 1.0
 	renderer.render(alpha)
 	debug_overlay.update_overlay(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [L] local axes  [C] COM  [J] anchors\nZero gravity, free hinges, illustrative prototype values: not a ride." % [
-		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report()]
+	_update_contact_markers(alpha)
+	_label.text = "%s\n%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [L] local axes  [C] COM  [J] anchors\nGravity on, flat static ground, free hinges, illustrative prototype values: not a ride, not self-balancing (no roll stability: standing only because the scene is exactly symmetric).\nGreen marker = touching, orange = separated." % [
+		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report()]
+
+
+## Pose of a body for rendering (interpolated PUBLISHED state; read-only).
+func _pose(body, alpha: float) -> Transform3D:
+	return SimBodyState.interpolate_transform(body.previous_state, body.published_state, alpha)
+
+
+## Signed gap (m) of a wheel's lowest point above the plane, from the interpolated published pose; NAN for degenerate geometry.
+func _published_geometry(contact, alpha: float) -> Dictionary:
+	var t: Transform3D = _pose(contact.body_b, alpha)
+	return WheelGroundContact.compute_geometry(t.origin, t.basis.get_rotation_quaternion(), contact.wheel_radius, contact.plane_point, contact.plane_normal)
+
+
+## One sphere per wheel at its lowest point; green while touching (gap < 0.1 mm, including penetration), orange while separated.
+func _update_contact_markers(alpha: float) -> void:
+	var contacts: Array = assembly.ground_contacts()
+	for k in contacts.size():
+		var geometry: Dictionary = _published_geometry(contacts[k], alpha)
+		var marker: MeshInstance3D = _markers[k]
+		marker.visible = geometry.valid
+		if geometry.valid:
+			marker.position = geometry.wheel_point
+			marker.material_override.albedo_color = Color(0.1, 0.9, 0.2) if geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE else Color(1.0, 0.55, 0.0)
+
+
+## Per wheel: signed gap (from the published pose), normal force (last step's normal impulse / dt, a read-only query of the solver's
+## result) and the contact state. Nothing is written.
+func _contact_report() -> String:
+	var text: String = "ground contacts (mu = %.2f):" % assembly.front_wheel_contact.friction
+	var names: Array = ["front", "rear"]
+	var contacts: Array = assembly.ground_contacts()
+	for k in contacts.size():
+		var contact = contacts[k]
+		var geometry: Dictionary = _published_geometry(contact, 1.0)
+		var gap_text: String = "%+.2f mm" % (geometry.gap * 1000.0) if geometry.valid else "n/a (degenerate)"
+		var state: String = "TOUCHING" if geometry.valid and geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE else "SEPARATED"
+		text += "\n  %s: gap %s   normal %.0f N   friction %.0f N   %s" % [names[k], gap_text,
+			contact.normal_impulse() / world.config.fixed_timestep, contact.friction_impulse_magnitude() / world.config.fixed_timestep, state]
+	return text
 
 
 ## Relative angular velocity about each hinge axis, from PUBLISHED state only (read-only; no constraint or body is touched).
