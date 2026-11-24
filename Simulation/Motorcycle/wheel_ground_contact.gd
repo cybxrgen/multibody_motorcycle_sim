@@ -204,6 +204,12 @@ func prepare(dt: float, config) -> void:
 			row.split_enabled = false
 		return
 	contact_active = true
+	_prepare_active(dt, config)
+
+
+## Builds the rows of an ACTIVE contact (hook, M2.4.2). The default is the generic ContactConstraint preparation (normal row, generic
+## Coulomb friction, warm start); TireGroundContact overrides it so that the tangential response belongs to the tyre model alone.
+func _prepare_active(dt: float, config) -> void:
 	super.prepare(dt, config)
 
 

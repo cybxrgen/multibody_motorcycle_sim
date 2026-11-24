@@ -26,6 +26,7 @@ const JointSpec = preload("res://Simulation/Motorcycle/motorcycle_joint_spec.gd"
 const SuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_suspension_spec.gd")
 const RearSuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_rear_suspension_spec.gd")
 const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
+const TireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
@@ -68,6 +69,11 @@ var rear_suspension: RearSuspensionSpec = RearSuspensionSpec.new()
 ## Optional flat static ground plane (M2.4.1). null (the default) builds no ground and no wheel contact, exactly the M2.1-M2.3 assembly.
 ## When set, the builder adds one static ground body and one WheelGroundContact per wheel.
 var ground: GroundSpec = null
+## Optional tyre of each wheel (M2.4.2); null (the default) leaves that wheel with the generic M2.4.1 Coulomb contact. A tyre needs a
+## ground. The two specs are independent objects (the same instance may not serve both wheels). A wheel with a tyre has exactly one
+## owner of its tangential response: the tyre model (TireGroundContact), never the generic Coulomb friction.
+var front_tire: TireSpec = null
+var rear_tire: TireSpec = null
 
 ## Wheel proxy / geometry dimensions (m). Used by presentation and by wheel_inertia() in fixtures; the physical
 ## quantity is `local_inertia` of the wheel body spec.
@@ -151,6 +157,7 @@ func validate() -> PackedStringArray:
 	_check_fork(errors)
 	_check_rear_suspension(errors)
 	_check_ground(errors)
+	_check_tires(errors)
 	return errors
 
 
@@ -257,3 +264,18 @@ func _check_ground(errors: PackedStringArray) -> void:
 			var geometry: Dictionary = WheelGroundContact.compute_geometry(spec.position, spec.orientation.normalized(), 1.0, Vector3.ZERO, ground.normal.normalized())
 			if not geometry.valid and "degenerate" in geometry.reason:
 				errors.append("ground: the %s axle is nearly parallel to the ground normal at the reference pose (%s)" % [pair[2], geometry.reason])
+
+
+## Tyre rules (M2.4.2): a tyre needs a ground, the two tyres are distinct objects, and each tyre's own rules hold against the radius
+## of its wheel (TireSpec.validate).
+func _check_tires(errors: PackedStringArray) -> void:
+	if front_tire == null and rear_tire == null:
+		return
+	if ground == null:
+		errors.append("tires: a tyre specification requires a ground (the tyre acts through the wheel-ground contact)")
+	if front_tire != null and front_tire == rear_tire:
+		errors.append("tires: the front and rear tyre must be independent specification objects")
+	for pair in [[front_tire, front_wheel_radius, "front"], [rear_tire, rear_wheel_radius, "rear"]]:
+		if pair[0] != null:
+			for message in pair[0].validate(pair[1] if is_finite(pair[1]) else 0.0):
+				errors.append("%s %s" % [pair[2], message])

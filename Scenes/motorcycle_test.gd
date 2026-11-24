@@ -1,22 +1,32 @@
 extends Node3D
-## M2.4.1 demonstration: the motorcycle assembly (six rigid bodies, four free hinges, the fork's prismatic joint with a spring-damper
+## M2.4.2 demonstration: the motorcycle assembly (six rigid bodies, four free hinges, the fork's prismatic joint with a spring-damper
 ## and finite travel, the rear spring-damper) under GRAVITY on a flat static ground plane (y = 0), built by MotorcycleBuilder from the
-## ILLUSTRATIVE prototype parameters (not a real motorcycle) with MotorcyclePrototype.config_with_ground(). Each wheel touches the
-## plane through one WheelGroundContact (generic ContactConstraint: unilateral normal impulse, split-impulse penetration correction,
-## Coulomb friction mu = 0.8), re-seated at every fixed step. Nothing is positioned by hand: the scene only advances the world with the
-## fixed-step accumulator and renders PUBLISHED state; it never writes physical state.
+## ILLUSTRATIVE prototype parameters (not a real motorcycle) with MotorcyclePrototype.config_with_tires(). Each wheel touches the plane
+## through one TireGroundContact: the generic unilateral normal response plus a deliberately simple tyre model (longitudinal and lateral slip,
+## combined-slip friction ellipse, rolling resistance) that is the ONLY owner of the tangential force (no generic Coulomb friction on top).
+## Tyre values are illustrative prototype parameters, NOT measured tyre data. Nothing is positioned by hand: the scene only advances the
+## world with the fixed-step accumulator and renders PUBLISHED state; it never writes physical state.
 ##
-## NOT a ride and NOT self-balancing: a riderless motorcycle on two narrow point contacts is not stable in roll, and there is no rider,
-## drive, steering control, stand or stabilizer. The scene is exactly symmetric about its x = 0 plane, so no lateral disturbance ever
-## arises and it stays standing in a knife-edge balance; that is NOT stability (a small roll disturbance topples it within seconds, see
-## Tests/test_motorcycle_ground.gd). Suspension sag, loading of the two wheels and the contact lifecycle are what this scene shows.
+## PHYSICAL MODEL vs EXTERNAL TEST INPUT. The physical model is everything the world integrates by itself: bodies, joints, suspension,
+## normal contact and the tyre model. The only external inputs are the two toggles below, applied by a small TEST-ONLY force provider
+## (TestInput, defined in this script, registered in the world so it acts at every fixed step): an axle torque on the rear wheel
+## ([T], "drive") and an axle torque opposing the spin of both wheels ([B], "brake"). They are NOT an engine, clutch, gearbox, drivetrain,
+## brake system, rider or controller. Wheel torques only change the wheel spin; the tyres turn the resulting slip into force.
+## Cornering and combined braking + lateral slip need a lateral disturbance that a riderless motorcycle cannot hold, so they are exercised
+## in Tests/test_tire_forces.gd (single wheel) and Tests/test_motorcycle_tires.gd (assembly on a TEST-ONLY planar fixture), not here.
+##
+## NOT a ride, NOT self-balancing, NOT a complete tyre model: a riderless motorcycle on two narrow point contacts is not stable in roll, and
+## there is no rider, drive, steering control, stand or stabilizer. The scene is exactly symmetric about its x = 0 plane, so under [T] and
+## [B] (both symmetric) it keeps standing/running straight in a knife-edge balance; that is NOT stability. A small disturbance topples it.
 ##
 ## Colors: chassis blue-grey, steering assembly orange, fork slider cyan, swingarm green, front wheel red, rear wheel yellow; wheels carry
 ## a contrasting spoke bar and valve marker so their rotation is visible; the dark slab is the ground plane. Contact markers (spheres at
 ## each wheel's lowest point, derived from the published pose): GREEN = touching (|gap| < 0.1 mm or penetrating), ORANGE = separated.
-## Overlay: magenta/cyan crosses are the two anchors of each constraint (hinges and contacts). The label lists, per wheel, the signed gap,
-## the normal force (last step's normal impulse / dt, read-only) and the contact state.
-## Keys: Space pause/resume, N single step (paused), R reset, L local axes, C COM markers, J anchors, mouse drag orbit, wheel zoom.
+## Overlay: magenta/cyan crosses are the two anchors of each constraint (hinges and contacts). The label lists, per tyre, the signed gap,
+## the normal load (last step's normal impulse / dt, read-only), the tyre slips (from the published pose and velocities), the longitudinal
+## and lateral tyre force, the friction-ellipse utilisation and the rolling-resistance moment.
+## Keys: Space pause/resume, N single step (paused), R reset, T external drive torque on/off, B external brake torque on/off, L local axes,
+## C COM markers, J anchors, mouse drag orbit, wheel zoom.
 
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
 const SimBodyState = preload("res://Simulation/Core/sim_body_state.gd")
@@ -25,12 +35,40 @@ const MotorcyclePrototype = preload("res://Simulation/Motorcycle/motorcycle_prot
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const SimulationRenderer = preload("res://Simulation/Presentation/simulation_renderer.gd")
 const SimulationDebug = preload("res://Simulation/Debug/simulation_debug.gd")
+const SimForceProvider = preload("res://Simulation/Core/sim_force_provider.gd")
+const TireModel = preload("res://Simulation/Motorcycle/tire_model.gd")
+
+## Illustrative magnitudes of the two external test inputs (N m).
+const DRIVE_TORQUE: float = 60.0
+const BRAKE_TORQUE: float = 40.0
+
+
+## TEST-ONLY external input (not part of the motorcycle model): axle torques applied at every fixed step.
+class TestInput extends SimForceProvider:
+	var front_wheel
+	var rear_wheel
+	var drive: bool = false
+	var brake: bool = false
+
+	func involved_bodies() -> Array:
+		return [front_wheel, rear_wheel]
+
+	func apply_forces(_dt: float, _config) -> void:
+		var rear_axle: Vector3 = rear_wheel.orientation * Vector3.RIGHT
+		if drive:
+			rear_wheel.apply_torque(-rear_axle * DRIVE_TORQUE)  # positive drive: the wheel turns about -axle (forward rolling)
+		if brake:
+			for wheel in [front_wheel, rear_wheel]:
+				var axle: Vector3 = wheel.orientation * Vector3.RIGHT
+				var spin: float = -wheel.angular_velocity.dot(axle)
+				wheel.apply_torque(axle * BRAKE_TORQUE * clampf(spin / 0.5, -1.0, 1.0))  # opposes the spin
 
 var world: SimWorld
 var assembly = null
 var renderer: SimulationRenderer = SimulationRenderer.new()
 var debug_overlay: SimulationDebug = SimulationDebug.new()
 var paused: bool = false
+var test_input: TestInput = TestInput.new()
 
 var _camera: Camera3D = Camera3D.new()
 var _yaw: float = 0.9
@@ -69,11 +107,15 @@ func _build_scenario() -> void:
 		marker.queue_free()
 	_markers.clear()
 	world = SimWorld.new()  # default SimConfig: gravity (0, -9.81, 0)
-	var config = MotorcyclePrototype.config_with_ground()
+	var config = MotorcyclePrototype.config_with_tires()
 	assembly = MotorcycleBuilder.build(config, world)
 	if assembly == null:
 		push_error("motorcycle_test: the assembly could not be built.")
 		return
+	test_input = TestInput.new()
+	test_input.front_wheel = assembly.front_wheel
+	test_input.rear_wheel = assembly.rear_wheel
+	world.add_force_provider(test_input)
 	renderer.world = world
 	debug_overlay.world = world
 
@@ -123,8 +165,9 @@ func _process(delta: float) -> void:
 	renderer.render(alpha)
 	debug_overlay.update_overlay(alpha)
 	_update_contact_markers(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [L] local axes  [C] COM  [J] anchors\nGravity on, flat static ground, free hinges, illustrative prototype values: not a ride, not self-balancing (no roll stability: standing only because the scene is exactly symmetric).\nGreen marker = touching, orange = separated." % [
-		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report()]
+	_label.text = "%s\n%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [T] external drive torque  [B] external brake torque  [L] local axes  [C] COM  [J] anchors\nEXTERNAL TEST INPUT (not a drivetrain or rider): drive %s (%.0f N m on the rear axle), brake %s (%.0f N m against both spins).\nPhysical model: gravity, free hinges, suspension, normal contact, simple illustrative tyres (not measured data). Not a ride, not self-balancing, not a complete tyre model (no roll stability: running only because the scene is exactly symmetric).\nGreen marker = touching, orange = separated." % [
+		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(),
+		"ON" if test_input.drive else "off", DRIVE_TORQUE, "ON" if test_input.brake else "off", BRAKE_TORQUE]
 
 
 ## Pose of a body for rendering (interpolated PUBLISHED state; read-only).
@@ -150,10 +193,11 @@ func _update_contact_markers(alpha: float) -> void:
 			marker.material_override.albedo_color = Color(0.1, 0.9, 0.2) if geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE else Color(1.0, 0.55, 0.0)
 
 
-## Per wheel: signed gap (from the published pose), normal force (last step's normal impulse / dt, a read-only query of the solver's
-## result) and the contact state. Nothing is written.
+## Per tyre: signed gap and the contact state (from the published pose), the normal load, the tyre force, the friction utilisation and
+## the rolling-resistance moment (last solved step, read-only queries of the solver's results), and the slips evaluated from the PUBLISHED
+## state with TireModel.slip (read-only). Nothing is written.
 func _contact_report() -> String:
-	var text: String = "ground contacts (mu = %.2f):" % assembly.front_wheel_contact.friction
+	var text: String = "tyre contacts (surface mu = %.2f, illustrative tyre parameters):" % assembly.front_wheel_contact.friction
 	var names: Array = ["front", "rear"]
 	var contacts: Array = assembly.ground_contacts()
 	for k in contacts.size():
@@ -161,8 +205,13 @@ func _contact_report() -> String:
 		var geometry: Dictionary = _published_geometry(contact, 1.0)
 		var gap_text: String = "%+.2f mm" % (geometry.gap * 1000.0) if geometry.valid else "n/a (degenerate)"
 		var state: String = "TOUCHING" if geometry.valid and geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE else "SEPARATED"
-		text += "\n  %s: gap %s   normal %.0f N   friction %.0f N   %s" % [names[k], gap_text,
-			contact.normal_impulse() / world.config.fixed_timestep, contact.friction_impulse_magnitude() / world.config.fixed_timestep, state]
+		var pub = contact.body_b.published_state
+		var slip: Dictionary = TireModel.slip(pub.position, pub.orientation, pub.linear_velocity, pub.angular_velocity, contact.wheel_radius,
+			contact.tire.rolling_radius, contact.plane_point, contact.plane_normal, contact.tire.low_speed_reference)
+		var slip_text: String = "slip x %+.3f y %+.3f" % [slip.slip_x, slip.slip_y] if slip.valid else "slip n/a"
+		text += "\n  %s: gap %s  %s   normal %.0f N   Fx %+.0f N  Fy %+.0f N  (limits %.0f / %.0f N, utilisation %.2f)   rolling resistance %+.2f N m   %s" % [names[k], gap_text, slip_text,
+			contact.normal_load(), contact.longitudinal_force(), contact.lateral_force(), contact.longitudinal_force_limit(), contact.lateral_force_limit(),
+			contact.friction_utilization(), contact.rolling_resistance_torque(), state]
 	return text
 
 
@@ -206,6 +255,10 @@ func _unhandled_input(event: InputEvent) -> void:
 					world.step()
 			KEY_R:
 				_build_scenario()
+			KEY_T:
+				test_input.drive = not test_input.drive
+			KEY_B:
+				test_input.brake = not test_input.brake
 			KEY_L:
 				debug_overlay.show_local_axes = not debug_overlay.show_local_axes
 			KEY_C:

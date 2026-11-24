@@ -6,34 +6,35 @@
 Labels: **VERIFIED** (confirmed by inspection/execution), **REPORTED** (stated by an earlier agent, not re-confirmed), **UNVERIFIED** (not checked).
 
 ## 1. Assignment
-M2.4.1 — Wheel–Ground Contact: a flat static ground plane and one point contact per wheel for the six-body motorcycle, geometry refreshed at every fixed step, solved by the existing generic `ContactConstraint`; no tire force model, no roll stabilisation.
+M2.4.2 — Tire Behavior: longitudinal and lateral slip, longitudinal and lateral tyre forces, combined-slip friction limit and rolling resistance on the existing front and rear wheel-ground contacts, with exactly one owner of the tangential response; no engine, clutch, gearbox, final drive, rider or automatic control (M2.5/M2.6 not started).
 
 ## 2. Git observation at delivery
-- Start (VERIFIED): `main` at `1029b8b` (merge of pull request #12, M2.3), clean tree, shallow read-only clone of `https://github.com/cybxrgen/multibody_motorcycle_sim`. Work branch `m2/wheel-ground-contact` created from it. One local commit on that branch; not pushed, not merged, no pull request. The commit SHA is in the delivery report.
-- Milestones (separate from Git): M2 in progress; M2.3 merged; M2.4.1 implemented, awaiting the user's review.
+- Start (VERIFIED): `main` at `c31940d` (merge of pull request #13, M2.4.1), clean tree, clone of `https://github.com/cybxrgen/multibody_motorcycle_sim`. Work branch `m2/tire-behavior` created from it. One local commit on that branch; not pushed, not merged, no pull request. The commit SHA is in the delivery report.
+- Milestones (separate from Git): M2 in progress; M2.4.1 merged; M2.4.2 implemented, awaiting the user's review. M2.4 and M2 are not complete or accepted.
 
 ## 3. What changed
-- **No change in `Simulation/Core` or `Simulation/Solver`.** New in `Simulation/Motorcycle/`: `wheel_ground_contact.gd` (`WheelGroundContact`, a `ContactConstraint` subclass whose `prepare()` re-derives the geometry every fixed step, re-seats the anchors/normal and deactivates itself, discarding carried impulses, when degenerate or clearly separated) and `motorcycle_ground_spec.gd`. `MotorcycleConfig.ground` (default null), builder step 3c with rollback, assembly references `ground`, `front_wheel_contact`, `rear_wheel_contact`, `set_ground_contacts_enabled()`, `remove_ground()`, `MotorcyclePrototype.config_with_ground()`.
-- **Scene:** `motorcycle_test` now runs under gravity on the ground, with contact markers and a per-wheel gap / normal force / state HUD.
-- **Tests:** `test_wheel_ground_geometry.gd` (14), `test_wheel_ground_contact.gd` (18), `test_motorcycle_ground.gd` (10), helper `ground_rig.gd` (contains the TEST-ONLY vertical-slide roll fixture). No existing test was edited.
+- **No change in `Simulation/Core` or `Simulation/Solver`.** New in `Simulation/Motorcycle/`: `motorcycle_tire_spec.gd` (validated per-wheel tyre data), `tire_model.gd` (pure slip, force-law and rolling-resistance functions), `tire_ground_contact.gd` (`WheelGroundContact` subclass: normal response + the tyre as the only owner of the tangential response, implicit 2x2 solve per iteration with the same-iteration normal load, rolling-resistance axle moment). One-method hook `_prepare_active()` added to `wheel_ground_contact.gd` (default = previous behaviour). `MotorcycleConfig.front_tire`/`rear_tire` (default null, validated before any mutation), builder creates `TireGroundContact` for a wheel with a tyre (rollback unchanged), assembly `front_tire`/`rear_tire`, `tires()`, `set_tire_forces_enabled()`, `MotorcyclePrototype.tire_spec()`/`config_with_tires()`.
+- **Friction ownership:** the generic Coulomb block is bypassed for tyre wheels; wheels without a tyre keep the M2.4.1 behaviour. Details: `ARCHITECTURE.md` ("Tyre model"), `PHYSICS_CONVENTIONS.md` ("Tyre behaviour").
+- **Scene:** `motorcycle_test` uses `config_with_tires()`, shows slips, forces, load, utilisation and rolling-resistance moment per tyre, and has two TEST-ONLY external axle-torque toggles (`T` drive, `B` brake) applied by a provider defined in the scene script.
+- **Tests:** `test_tire_slip.gd` (14), `test_tire_forces.gd` (23), `test_tire_rolling_lifecycle.gd` (13), `test_tire_regression.gd` (12, permanent mutants), `test_motorcycle_tires.gd` (12), fixture `tire_rig.gd` (contains the TEST-ONLY planar carriage fixture). No existing test was edited.
 - **Docs updated:** `PROJECT_STATE.md`, `PHASE_PLAN.md`, `ARCHITECTURE.md`, `PHYSICS_CONVENTIONS.md`, `TESTING.md`, this file. `AGENTS.md` untouched.
 
-## 4. Verification (Godot 4.7.stable.official.5b4e0cb0f, Linux x86_64, headless, no display; official binary from the godotengine release, downloaded with the user's authorization)
-- VERIFIED baseline on unchanged `main`: 348 passed, 0 failed (7748 checks).
-- VERIFIED final: 390 passed, 0 failed, 0 skipped (8111 checks), exit 0, no `SCRIPT ERROR`, after a fresh import (`.godot/` deleted; exit 0, 0 error/warning lines). Numbers are re-confirmed in the delivery report for the committed tree.
-- VERIFIED headless smoke (`--quit-after 240`): `motorcycle_test`, `simulation_test`, `main` all exit 0, 0 error/warning lines; `motorcycle_test` with `--fixed-fps 60 --quit-after 9000` exit 0.
-- VERIFIED sustained runs (scripted, not committed): 60 s unconstrained undisturbed (standing, gaps 0, 940 N front / 806 N rear, no fault); 60 s with the test-only fixture (support/weight 0.99999996); roll disturbance 0.01 rad/s topples past 30° at 1.7 s. Details: `PROJECT_STATE.md`.
-- VERIFIED mutation checks (three implementation defects injected and reverted) — `PROJECT_STATE.md`.
-- UNVERIFIED: graphical inspection of the scene (never performed).
+## 4. Verification (Godot 4.7.stable.official.5b4e0cb0f, Linux x86_64, headless, no display)
+- VERIFIED baseline on unchanged `main`: 390 passed, 0 failed (8111 checks), exit 0, 147 s.
+- VERIFIED final: 464 passed, 0 failed, 0 skipped (8931 checks), exit 0, no `SCRIPT ERROR`, 166 s; fresh import (`.godot/` deleted) exit 0, 0 error/warning lines.
+- VERIFIED headless smoke (`--quit-after 240`): `motorcycle_test`, `simulation_test`, `main` exit 0, 0 error/warning lines; `motorcycle_test` with `--fixed-fps 60 --quit-after 9000` exit 0.
+- VERIFIED scripted sustained runs (not committed) and the scene's test-input toggles exercised through the scene script headlessly: `PROJECT_STATE.md`.
+- UNVERIFIED: graphical inspection (never performed); behaviour beyond the scripted runs.
 
 ## 5. Findings worth keeping
-- `prepare()` is already a per-fixed-step hook; no generic extension was needed.
-- The undisturbed assembly stays upright only through exact symmetry (knife-edge), not stability; the scene text and tests say so.
-- After a topple only the wheels collide with the ground; the chassis passes through the plane (limitation, `PROJECT_STATE.md`).
-- A first draft of the contact class set its fields after the generic constructor validated; the constructor now takes them (a construction-order defect found by the smoke test).
+- Rolling resistance applied as a contact force is cancelled by the slip force of a free wheel (no deceleration); it is an axle moment now.
+- An explicit tyre force is unstable for the wheel's axle inertia; the tangential response is solved implicitly inside the solver iteration, which also gives the same-iteration normal load.
+- With `k_x != k_y` the direction of a saturated force is stiffness-weighted, not the sliding direction (documented limitation).
+- A first independent-clamp mutant was not detected because the common-factor law already stays inside the ellipse; it was rewritten as a genuine per-axis law.
+- A constant negative axle torque is not a brake (it reverses the machine after standstill); the scene's brake toggle opposes the spin instead.
 
 ## 6. Unresolved / limitations
-See `PROJECT_STATE.md` ("Ground contact (M2.4.1)"): no roll stability, wheel-only collision, thin-circle geometry, graphical inspection not done.
+See `PROJECT_STATE.md` ("Tyre model (M2.4.2)"): illustrative parameters, no relaxation/patch/camber thrust, no static friction at rest, cornering and combined scenarios only on a single wheel and the test-only fixture, graphics not inspected.
 
 ## 7. Next action
-Await the user's review of M2.4.1 and an explicit assignment for further work (M2.5 is not authorized). The agent does not push or merge.
+Await the user's review of M2.4.2 and an explicit assignment for further work (M2.5 and M2.6 are not authorized). The agent does not push or merge.
