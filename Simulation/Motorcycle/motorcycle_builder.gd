@@ -171,6 +171,12 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 		if config.rear_tire != null:
 			assembly.rear_tire = contacts[1]
 
+	# 3d. Finite-width tyre geometry (M2.5.1): validated with the configuration above; stored as independent copies, not yet used by the contacts.
+	if config.front_tire_geometry != null:
+		assembly.front_tire_geometry = config.front_tire_geometry.duplicate_spec()
+	if config.rear_tire_geometry != null:
+		assembly.rear_tire_geometry = config.rear_tire_geometry.duplicate_spec()
+
 	# 4. Self-check of the construction contract (coincident anchors, aligned axes).
 	var contract_error: String = construction_error(assembly)
 	if contract_error != "":

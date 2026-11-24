@@ -28,6 +28,7 @@ const RearSuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_rear_
 const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
 const TireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
+const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
@@ -74,6 +75,11 @@ var ground: GroundSpec = null
 ## owner of its tangential response: the tyre model (TireGroundContact), never the generic Coulomb friction.
 var front_tire: TireSpec = null
 var rear_tire: TireSpec = null
+## Optional finite-width tyre cross-section of each wheel (M2.5.1); null (the default) keeps the zero-width centreline geometry. Pure geometry
+## description: it does not change the contact or the tyre forces (M2.5.2 will use it). Front and rear are independent objects and
+## independent of the wheel widths below (visual / inertia dimensions). Rules: TireGeometry.validate (single home).
+var front_tire_geometry: TireGeometry = null
+var rear_tire_geometry: TireGeometry = null
 
 ## Wheel proxy / geometry dimensions (m). Used by presentation and by wheel_inertia() in fixtures; the physical
 ## quantity is `local_inertia` of the wheel body spec.
@@ -158,6 +164,7 @@ func validate() -> PackedStringArray:
 	_check_rear_suspension(errors)
 	_check_ground(errors)
 	_check_tires(errors)
+	_check_tire_geometry(errors)
 	return errors
 
 
@@ -276,6 +283,16 @@ func _check_tires(errors: PackedStringArray) -> void:
 	if front_tire != null and front_tire == rear_tire:
 		errors.append("tires: the front and rear tyre must be independent specification objects")
 	for pair in [[front_tire, front_wheel_radius, "front"], [rear_tire, rear_wheel_radius, "rear"]]:
+		if pair[0] != null:
+			for message in pair[0].validate(pair[1] if is_finite(pair[1]) else 0.0):
+				errors.append("%s %s" % [pair[2], message])
+
+
+## Finite-width tyre geometry rules (M2.5.1): the two objects are distinct and each satisfies TireGeometry.validate against the radius of its wheel.
+func _check_tire_geometry(errors: PackedStringArray) -> void:
+	if front_tire_geometry != null and front_tire_geometry == rear_tire_geometry:
+		errors.append("tire geometry: the front and rear geometry must be independent specification objects")
+	for pair in [[front_tire_geometry, front_wheel_radius, "front"], [rear_tire_geometry, rear_wheel_radius, "rear"]]:
 		if pair[0] != null:
 			for message in pair[0].validate(pair[1] if is_finite(pair[1]) else 0.0):
 				errors.append("%s %s" % [pair[2], message])

@@ -6,32 +6,23 @@
 Labels: **VERIFIED** (confirmed by inspection/execution), **REPORTED** (stated by an earlier agent, not re-confirmed), **UNVERIFIED** (not checked).
 
 ## 1. Assignment
-M2.4.2.1 — Prevent tire forces during speculative contact: the M2.4.2 tyre treated any positive normal impulse as physical load, so it applied longitudinal and lateral force, rolling resistance and a tangential warm start while the wheel was still separated from the ground inside the speculative activation distance. Smallest targeted correction in the tyre contact, regression tests for the missed boundary, no change to the generic speculative policy, the tyre model, its parameters or the suspension/drivetrain/rider (M2.5/M2.6 not started).
+M2.5.1.1 — Tire geometry validation hardening: fix two reported defects of M2.5.1 (PR #17) in `Simulation/Motorcycle/tire_geometry.gd` without changing the profile model, camber behaviour, contacts or solver: (1) `profile_radius()` could return a negative radius; (2) an invalid result could expose a non-finite plane normal. M2.5.2 and later were not started.
 
 ## 2. Git observation at delivery
-- Start (VERIFIED): head of pull request #14 fetched as `refs/pull/14/head`, commit `78ccd46` (M2.4.2, on top of `c31940d`, the merge of PR #13), clean tree, clone of `https://github.com/cybxrgen/multibody_motorcycle_sim`. Work branch `m2/tire-speculative-contact` created from it. One local commit on that branch; not pushed, not merged, no pull request. The commit SHA is in the delivery report.
-- Milestones (separate from Git): M2 in progress; M2.4.1 merged; M2.4.2 and this correction implemented, awaiting the user's review. M2.4 and M2 are not complete or accepted.
+- Start (VERIFIED): clone of `https://github.com/cybxrgen/multibody_motorcycle_sim`; `refs/pull/17/head` = `86f8ede28dc070fc4db2e1b0ad670a039a5f2da8` (tree identical to the earlier local delivery commit `8db6a9d`, which is only a different SHA of the same patch). Clean tree. The local branch `m2/finite-width-tire-geometry` was set to that head and one follow-up commit added; not pushed, not merged. The follow-up SHA is in the delivery report.
 
 ## 3. What changed
-- **`Simulation/Motorcycle/tire_ground_contact.gd`:** `_touching = gap <= TOUCH_TOLERANCE` (start-of-step gap, the existing 0.1 mm constant of `WheelGroundContact`, penetration included) gates every tyre effect: no tangential warm start (the carried tyre impulse is cleared), zero tangential target, zero rolling-resistance target. `normal_load()`, the force limits and `friction_utilization()` report physical load only while touching. New queries `is_touching()` and `speculative_normal_impulse()`. `reset_warm_start()` clears the flag.
-- **`wheel_ground_contact.gd`:** comment of `TOUCH_TOLERANCE` only. **No change in `Simulation/Core`, `Simulation/Solver`, the generic contact rows, the activation distance, tyre parameters, the friction envelope, the builder or the assembly.**
-- **Tests:** new `Tests/test_tire_speculative_contact.gd` (11 tests: speculative approach for front and rear wheel with the positive normal impulse and the positive gap asserted, fast and slow approach, no warm start across separation and over six speculative steps, actual contact, penetration and the touch boundary, re-contact, natural landing, in-suite old-behaviour mutant). One existing test adapted: `test_motorcycle_tires.gd::test_g10` encoded the defect (a hand-applied steering input leaves a 0.15 mm gap and the test measured a tyre force across it); it now steps until the wheel touches, expectation and tolerances unchanged (`TESTING.md`).
-- **Docs updated:** `PROJECT_STATE.md`, `PHYSICS_CONVENTIONS.md`, `ARCHITECTURE.md`, `TESTING.md`, `PHASE_PLAN.md`, this file. `AGENTS.md` untouched.
+- Root cause 1: `profile_radius()` validated the tyre without the wheel radius, so the rule "shoulder drop <= R/2" (which keeps `r(s) >= R/2 > 0`) never ran; e.g. width 0.5, crown 0.25, R 0.1 gave `r(w/2) = -0.15`. Correction: it now validates against `wheel_radius` (`is_valid(wheel_radius)`) and returns NaN unless the result is finite and > 0. `_evaluate` already validated against the wheel radius; it gained the same finite-and-positive guard as defence in depth.
+- Root cause 2: `_fail()` echoed the caller's normal, so a NaN/INF normal came back in an invalid result. Correction: the normal is echoed only when finite, otherwise it is `Vector3.ZERO`. Valid results and finite rejected normals are unchanged.
+- Tests: two regression tests in `Tests/test_tire_geometry.gd`. Documentation: this file and the verification numbers in `PROJECT_STATE.md` only (the technical documents already state the shoulder-drop rule and were accurate).
 
 ## 4. Verification (Godot 4.7.stable.official.5b4e0cb0f, Linux x86_64, headless, no display)
-- VERIFIED baseline on the unchanged PR #14 head: 464 passed, 0 failed, 0 skipped (8931 checks), exit 0.
-- VERIFIED defect on the unfixed code (rear wheel 2 mm above the plane, 2 m/s downward): normal impulse 27.6 N s, longitudinal force -2077 N, lateral force -230 N, rolling moment 15.9 N m, `normal_load()` 3315 N; with the correction the last four are exactly zero.
-- VERIFIED final: 475 passed, 0 failed, 0 skipped (9053 checks), exit 0, no `SCRIPT ERROR`; fresh import (`.godot/` deleted) exit 0, 0 error/warning lines.
-- VERIFIED headless smoke: `motorcycle_test`, `simulation_test`, `main` with `--quit-after 240` exit 0, 0 error/warning lines; `motorcycle_test` with `--fixed-fps 60 --quit-after 9000` exit 0, 0 error/warning lines.
+- VERIFIED reproduction before the fix: `profile_radius(0.1, 0.25)` = -0.15 for the 0.5 m / 0.25 m tread; invalid result carried normal `(0, nan, 0)`.
+- VERIFIED baseline 491 passed; final 493 passed, 0 failed, 0 skipped (10194 checks); the two new tests fail on the uncorrected file (491 passed, 2 failed) and pass on the corrected one. Fresh import and the four headless scene runs: exit 0, 0 error/warning lines.
 - UNVERIFIED: graphical inspection (never performed).
 
-## 5. Findings worth keeping
-- The new tests are only meaningful with an ACTIVE contact, `0 < gap <= activation distance` and a positive speculative impulse; the old suite used heights of 0.15 m and above, where the contact is inactive and discards everything.
-- The generic normal row legitimately warm starts from the speculative impulse, so the first touching step after a speculative one carries about 1 % different load than a fresh contact; the tyre state itself starts cold.
-- A hand-made kinematic change (the steering helper of the tests) can open a sub-millimetre gap; any test that sets state by hand and then expects tyre force on the next step must first make sure the wheel touches.
+## 5. Unresolved / limitations
+Unchanged from M2.5.1 (`PROJECT_STATE.md`, "Finite-width tyre geometry (M2.5.1)").
 
-## 6. Unresolved / limitations
-See `PROJECT_STATE.md` ("Tyre model (M2.4.2)"), in particular the new bullet: no tyre action on the landing step, judged from the start-of-step gap; the 0.1 mm tolerance is an illustrative fixture value. Everything else is unchanged.
-
-## 7. Next action
-Await the user's review and an explicit assignment for further work (M2.5 and M2.6 are not authorized). The agent does not push or merge.
+## 6. Next action
+Await the user's review and an explicit assignment. The agent does not push or merge.

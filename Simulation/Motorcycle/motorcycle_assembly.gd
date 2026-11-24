@@ -53,6 +53,10 @@ var rear_wheel_contact: WheelGroundContact
 ## tyre always references its wheel and its contact); null for a wheel without a tyre.
 var front_tire: TireGroundContact
 var rear_tire: TireGroundContact
+## M2.5.1 finite-width tyre cross-sections (copies of the configuration, null when not configured). Geometry only: the wheel contacts
+## above do not use them yet.
+var front_tire_geometry
+var rear_tire_geometry
 
 
 ## The six bodies: chassis, steering, fork slider, swingarm, front wheel, rear wheel.
