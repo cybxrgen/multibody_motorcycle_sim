@@ -416,3 +416,61 @@ func test_assembly_gives_each_wheel_its_own_geometry_and_leaves_the_topology_unc
 	no_ground.front_tire_geometry = geo()
 	var b = MotorcycleBuilder.build(no_ground)
 	check(b != null and b.front_tire_geometry != null and b.rear_tire_geometry == null and not b.has_ground(), "geometry does not require a ground and is independent per wheel")
+
+
+# --- M2.5.1.1 validation hardening ---
+
+func test_profile_radius_never_returns_a_negative_or_non_finite_radius() -> void:
+	# Regression: width 0.5, crown radius 0.25 (a semicircle), wheel radius 0.1: r(w/2) = 0.1 - 0.25 + 0 = -0.15 by hand.
+	# profile_radius used to validate without the wheel radius and returned that negative value.
+	var g = geo(0.5, 0.25)
+	check(g.is_valid() and not g.is_valid(0.1), "the tread is valid alone but not on a 0.1 m wheel (shoulder drop 0.25 m > 0.05 m)")
+	check(is_nan(g.profile_radius(0.1, 0.25)) and is_nan(g.profile_radius(0.1, -0.25)) and is_nan(g.profile_radius(0.1, 0.0)), "rejected at the shoulder, the opposite shoulder and the centreline")
+	check(is_nan(g.profile_radius(0.4, 0.25)), "a drop above half the wheel radius is rejected even when the radius stays positive (0.4 m wheel: r = 0.15 m, drop 0.25 m > 0.2 m)")
+	check_near(g.profile_radius(0.5, 0.25), 0.25, 1.0e-12, "a drop of exactly half the wheel radius is still admissible (0.5 m wheel: r = 0.25 m)")
+	check_near(g.profile_radius(0.6, 0.25), 0.6 - 0.25, 1.0e-12, "an admissible wheel radius still gives the hand value 0.35")
+	for bad_radius in [0.0, -0.3, NAN, INF, -INF, 1.0e200]:
+		check(is_nan(geo().profile_radius(bad_radius, 0.0)), "wheel radius %s" % bad_radius)
+	# Every successful value over a sweep of admissible tyres is positive and finite.
+	for dims in [[0.1, 0.05], [0.18, 0.1], [0.5, 0.25], [0.3, 10.0], [0.05, 0.025]]:
+		var t = geo(dims[0], dims[1])
+		for wheel_radius in [0.12, 0.2, 0.31, 1.0, 10.0]:
+			for i in 11:
+				var v: float = t.profile_radius(wheel_radius, -0.5 * dims[0] + dims[0] * float(i) / 10.0)
+				check(is_nan(v) or (is_finite(v) and v > 0.0), "r > 0 or rejected (w %s rho %s R %s)" % [dims[0], dims[1], wheel_radius])
+	var r: Dictionary = TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), Quaternion.IDENTITY, g, 0.1, Vector3.ZERO, Vector3.UP)
+	check(not r.valid and r.reason != "", "lowest_point rejects the same geometry")
+	check(not TireGeometry.point_at_offset(Vector3(0.0, 0.5, 0.0), Quaternion.IDENTITY, g, 0.1, Vector3.ZERO, Vector3.UP, 0.25).valid, "and so does point_at_offset")
+
+
+func test_invalid_results_never_expose_a_non_finite_normal_or_any_non_finite_vector() -> void:
+	# Regression: the invalid result echoed the input normal, so a NaN or INF normal came back unchanged.
+	var q: Quaternion = Quaternion.IDENTITY
+	var normals: Array = [Vector3(0.0, NAN, 0.0), Vector3(NAN, NAN, NAN), Vector3(0.0, INF, 0.0), Vector3(-INF, 0.0, 1.0), Vector3.ZERO,
+			Vector3(0.0, 2.0, 0.0), Vector3(1.0e30, 1.0e30, 1.0e30), Vector3(1.0, 0.0, 0.0)]
+	for n in normals:
+		var results: Array = [
+			TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), q, geo(), R, Vector3.ZERO, n),
+			TireGeometry.point_at_offset(Vector3(0.0, 0.5, 0.0), q, geo(), R, Vector3.ZERO, n, 0.0),
+			TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), q, geo(0.0, 0.1), R, Vector3.ZERO, n),
+			TireGeometry.lowest_point(Vector3(NAN, 0.5, 0.0), q, geo(), R, Vector3.ZERO, n),
+			TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), q, null, R, Vector3.ZERO, n),
+		]
+		for i in results.size():
+			var res: Dictionary = results[i]
+			var label: String = "normal %s, path %d" % [n, i]
+			if n == Vector3(1.0, 0.0, 0.0) and i == 0:
+				check(not res.valid and "degenerate" in res.reason, "normal along the axle is degenerate")
+			else:
+				check(not res.valid and res.reason != "", "invalid (%s)" % label)
+			for key in ["axle", "normal", "wheel_point", "ground_point", "radial_direction", "local_point"]:
+				check(res[key].is_finite(), "%s is finite (%s)" % [key, label])
+			for key in ["gap", "lateral_offset", "lateral_fraction", "unclamped_offset", "profile_radius"]:
+				check(is_finite(res[key]), "%s is finite (%s)" % [key, label])
+	var nan_result: Dictionary = TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), q, geo(), R, Vector3.ZERO, Vector3(0.0, NAN, 0.0))
+	check_vec3_near(nan_result.normal, Vector3.ZERO, 0.0, "a non-finite normal is replaced by the zero vector, deterministically")
+	var finite_bad: Dictionary = TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), q, geo(), R, Vector3.ZERO, Vector3(0.0, 2.0, 0.0))
+	check_vec3_near(finite_bad.normal, Vector3(0.0, 2.0, 0.0), 0.0, "a finite rejected normal is still echoed unchanged")
+	var ok: Dictionary = TireGeometry.lowest_point(Vector3(0.0, 0.5, 0.0), q, geo(), R, Vector3.ZERO, Vector3.UP)
+	check(ok.valid, "the valid case is unchanged")
+	check_vec3_near(ok.normal, Vector3.UP, 0.0, "and keeps the input normal convention")

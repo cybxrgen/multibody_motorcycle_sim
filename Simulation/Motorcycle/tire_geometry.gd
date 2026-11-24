@@ -82,12 +82,14 @@ func shoulder_drop() -> float:
 
 ## Radius r(s) of the surface at lateral offset s for centreline radius R. NaN for invalid dimensions or |s| > width / 2.
 func profile_radius(wheel_radius: float, lateral_offset: float) -> float:
-	if not (is_valid() and is_finite(wheel_radius) and wheel_radius > 0.0 and wheel_radius <= MAX_WHEEL_RADIUS):
+	# The shoulder-drop rule needs the wheel radius, so validate against it: otherwise a tread whose drop exceeds R gives r <= 0.
+	if not (is_finite(wheel_radius) and wheel_radius > 0.0 and is_valid(wheel_radius)):
 		return NAN
 	if not (is_finite(lateral_offset) and absf(lateral_offset) <= 0.5 * width + OFFSET_TOLERANCE):
 		return NAN
 	var s: float = clampf(lateral_offset, -0.5 * width, 0.5 * width)
-	return wheel_radius - crown_radius + sqrt(maxf(crown_radius * crown_radius - s * s, 0.0))
+	var radius: float = wheel_radius - crown_radius + sqrt(maxf(crown_radius * crown_radius - s * s, 0.0))
+	return radius if (is_finite(radius) and radius > 0.0) else NAN
 
 
 ## Lowest point of the tyre surface against a plane. Result keys (always present; meaningful only when valid):
@@ -119,8 +121,9 @@ static func point_at_offset(wheel_position: Vector3, wheel_orientation: Quaterni
 	return _evaluate(wheel_position, wheel_orientation, geometry, wheel_radius, plane_point, plane_unit_normal, lateral_offset)
 
 
+## Invalid result with deterministic, finite placeholders. The plane normal is echoed only when the input is finite; otherwise it is the zero vector.
 static func _fail(reason: String, normal: Vector3) -> Dictionary:
-	return {"valid": false, "reason": reason, "axle": Vector3.ZERO, "normal": normal, "wheel_point": Vector3.ZERO, "ground_point": Vector3.ZERO,
+	return {"valid": false, "reason": reason, "axle": Vector3.ZERO, "normal": normal if normal.is_finite() else Vector3.ZERO, "wheel_point": Vector3.ZERO, "ground_point": Vector3.ZERO,
 		"gap": 0.0, "lateral_offset": 0.0, "lateral_fraction": 0.0, "at_shoulder": false, "unclamped_offset": 0.0, "profile_radius": 0.0,
 		"radial_direction": Vector3.ZERO, "local_point": Vector3.ZERO}
 
@@ -164,6 +167,10 @@ static func _evaluate(wheel_position: Vector3, wheel_orientation: Quaternion, ge
 		s = clampf(requested_offset, -half, half)
 		at_shoulder = absf(s) >= half - OFFSET_TOLERANCE
 	var radius_at: float = wheel_radius - geometry.crown_radius + sqrt(maxf(geometry.crown_radius * geometry.crown_radius - s * s, 0.0))
+	if not (is_finite(radius_at) and radius_at > 0.0):
+		var bad_radius: Dictionary = _fail("tyre profile radius %s m is not positive and finite" % radius_at, n)
+		bad_radius.axle = u
+		return bad_radius
 	var e: Vector3 = -(in_plane / length)
 	var point: Vector3 = wheel_position + u * s + e * radius_at
 	var gap: float = n.dot(point - plane_point)
