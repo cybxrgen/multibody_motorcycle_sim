@@ -26,7 +26,10 @@ extends Node3D
 ## the normal load (last step's normal impulse / dt, read-only), the tyre slips (from the published pose and velocities), the longitudinal
 ## and lateral tyre force, the friction-ellipse utilisation and the rolling-resistance moment.
 ## Keys: Space pause/resume, N single step (paused), R reset, T external drive torque on/off, B external brake torque on/off, L local axes,
-## C COM markers, J anchors, mouse drag orbit, wheel zoom.
+## C COM markers, J anchors, G geometry wireframe (off by default: oriented bounding boxes of the six bodies in white, plus the finite-width 3D
+## tyre surfaces, front green / rear violet, generated from the configured TireGeometry; presentation only), mouse drag orbit, wheel zoom.
+## The scene gives each tyre a TireGeometry (illustrative: front 0.12 m wide, crown radius 0.07 m; rear 0.18 m, 0.10 m) so that there is a
+## surface to draw. The assembly only stores it (the wheel contacts do not use it yet), so the simulation is identical with or without it.
 
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
 const SimBodyState = preload("res://Simulation/Core/sim_body_state.gd")
@@ -37,6 +40,8 @@ const SimulationRenderer = preload("res://Simulation/Presentation/simulation_ren
 const SimulationDebug = preload("res://Simulation/Debug/simulation_debug.gd")
 const SimForceProvider = preload("res://Simulation/Core/sim_force_provider.gd")
 const TireModel = preload("res://Simulation/Motorcycle/tire_model.gd")
+const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
+const GeometryWireframe = preload("res://Simulation/Debug/geometry_wireframe.gd")
 
 ## Illustrative magnitudes of the two external test inputs (N m).
 const DRIVE_TORQUE: float = 60.0
@@ -67,6 +72,7 @@ var world: SimWorld
 var assembly = null
 var renderer: SimulationRenderer = SimulationRenderer.new()
 var debug_overlay: SimulationDebug = SimulationDebug.new()
+var wireframe: GeometryWireframe = GeometryWireframe.new()
 var paused: bool = false
 var test_input: TestInput = TestInput.new()
 
@@ -82,6 +88,7 @@ var _markers: Array = []
 func _ready() -> void:
 	add_child(renderer)
 	add_child(debug_overlay)
+	add_child(wireframe)
 	add_child(_camera)
 	var light: DirectionalLight3D = DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-50, -30, 0)
@@ -108,6 +115,8 @@ func _build_scenario() -> void:
 	_markers.clear()
 	world = SimWorld.new()  # default SimConfig: gravity (0, -9.81, 0)
 	var config = MotorcyclePrototype.config_with_tires()
+	config.front_tire_geometry = TireGeometry.new(0.12, 0.07)  # illustrative tread sections (geometry only; the contacts do not use them yet)
+	config.rear_tire_geometry = TireGeometry.new(0.18, 0.10)
 	assembly = MotorcycleBuilder.build(config, world)
 	if assembly == null:
 		push_error("motorcycle_test: the assembly could not be built.")
@@ -118,6 +127,7 @@ func _build_scenario() -> void:
 	world.add_force_provider(test_input)
 	renderer.world = world
 	debug_overlay.world = world
+	wireframe.setup(assembly)
 
 	renderer.add_box(assembly.chassis, config.chassis.visual_size, Color(0.45, 0.55, 0.75))
 	renderer.add_box(assembly.steering, config.steering.visual_size, Color(0.95, 0.55, 0.15))
@@ -164,10 +174,11 @@ func _process(delta: float) -> void:
 	var alpha: float = world.interpolation_alpha() if not paused else 1.0
 	renderer.render(alpha)
 	debug_overlay.update_overlay(alpha)
+	wireframe.update_wireframe(alpha)
 	_update_contact_markers(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [T] external drive torque  [B] external brake torque  [L] local axes  [C] COM  [J] anchors\nEXTERNAL TEST INPUT (not a drivetrain or rider): drive %s (%.0f N m on the rear axle), brake %s (%.0f N m against both spins).\nPhysical model: gravity, free hinges, suspension, normal contact, simple illustrative tyres (not measured data). Not a ride, not self-balancing, not a complete tyre model (no roll stability: running only because the scene is exactly symmetric).\nGreen marker = touching, orange = separated." % [
+	_label.text = "%s\n%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [T] external drive torque  [B] external brake torque  [L] local axes  [C] COM  [J] anchors  [G] geometry wireframe: %s\nEXTERNAL TEST INPUT (not a drivetrain or rider): drive %s (%.0f N m on the rear axle), brake %s (%.0f N m against both spins).\nPhysical model: gravity, free hinges, suspension, normal contact, simple illustrative tyres (not measured data). Not a ride, not self-balancing, not a complete tyre model (no roll stability: running only because the scene is exactly symmetric).\nGreen marker = touching, orange = separated." % [
 		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(),
-		"ON" if test_input.drive else "off", DRIVE_TORQUE, "ON" if test_input.brake else "off", BRAKE_TORQUE]
+		"ON" if wireframe.enabled else "off", "ON" if test_input.drive else "off", DRIVE_TORQUE, "ON" if test_input.brake else "off", BRAKE_TORQUE]
 
 
 ## Pose of a body for rendering (interpolated PUBLISHED state; read-only).
@@ -265,6 +276,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				debug_overlay.show_com = not debug_overlay.show_com
 			KEY_J:
 				debug_overlay.show_anchors = not debug_overlay.show_anchors
+			KEY_G:
+				wireframe.toggle()
 	elif event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
 		_yaw -= event.relative.x * 0.005
 		_pitch = clampf(_pitch - event.relative.y * 0.005, -1.5, 1.5)
