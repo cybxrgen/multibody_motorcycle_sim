@@ -29,6 +29,7 @@ const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.gd")
 const MotorcycleAssembly = preload("res://Simulation/Motorcycle/motorcycle_assembly.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
+const TireGroundContact = preload("res://Simulation/Motorcycle/tire_ground_contact.gd")
 
 ## Construction self-check: world anchors of a hinge must agree within this distance. Pivot coordinates of order 1 m carry
 ## float32 rounding of ~1e-7 m per operation (local = R^-1 (P - x), world = x + R local: a few operations), so honest
@@ -147,10 +148,16 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 			return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the ground body")
 		added_bodies.append(ground_body)
 		assembly.ground = ground_body
-		var wheel_links: Array = [[assembly.front_wheel, config.front_wheel_radius, "front"], [assembly.rear_wheel, config.rear_wheel_radius, "rear"]]
+		var wheel_links: Array = [[assembly.front_wheel, config.front_wheel_radius, "front", config.front_tire], [assembly.rear_wheel, config.rear_wheel_radius, "rear", config.rear_tire]]
 		var contacts: Array = []
 		for link in wheel_links:
-			var contact = WheelGroundContact.create(ground_body, link[0], link[1], ground_spec.point, ground_spec.normal, ground_spec.friction, ground_spec.activation_distance)
+			# M2.4.2: a wheel with a tyre gets a TireGroundContact (the tyre model owns the tangential response; the tyre is copied so
+			# later edits of the configuration do not reach the simulation), otherwise the generic M2.4.1 WheelGroundContact.
+			var contact = null
+			if link[3] != null:
+				contact = TireGroundContact.create_with_tire(ground_body, link[0], link[1], ground_spec.point, ground_spec.normal, ground_spec.friction, link[3].duplicate_spec(), ground_spec.activation_distance)
+			else:
+				contact = WheelGroundContact.create(ground_body, link[0], link[1], ground_spec.point, ground_spec.normal, ground_spec.friction, ground_spec.activation_distance)
 			if contact == null:
 				return _fail(target, added_bodies, added_constraints, added_providers, "the %s wheel ground contact could not be created" % link[2])
 			if target.add_constraint(contact) == null:
@@ -159,6 +166,10 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 			contacts.append(contact)
 		assembly.front_wheel_contact = contacts[0]
 		assembly.rear_wheel_contact = contacts[1]
+		if config.front_tire != null:
+			assembly.front_tire = contacts[0]
+		if config.rear_tire != null:
+			assembly.rear_tire = contacts[1]
 
 	# 4. Self-check of the construction contract (coincident anchors, aligned axes).
 	var contract_error: String = construction_error(assembly)

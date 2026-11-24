@@ -38,6 +38,7 @@ const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.
 const BodySpec = preload("res://Simulation/Motorcycle/motorcycle_body_spec.gd")
 const JointSpec = preload("res://Simulation/Motorcycle/motorcycle_joint_spec.gd")
 const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
+const TireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 
 ## Steering-axis rake from the vertical (degrees).
@@ -55,6 +56,39 @@ const GROUND_FRICTION: float = 0.8
 static func config_with_ground() -> MotorcycleConfig:
 	var c: MotorcycleConfig = config()
 	c.ground = GroundSpec.new(Vector3.ZERO, Vector3.UP, GROUND_FRICTION)
+	return c
+
+
+## ILLUSTRATIVE initial tyre parameters of the prototype (M2.4.2): simulation fixture values of a deliberately simple model, NOT measured
+## or fitted tyre data, and not tuned against any result. The rolling radius equals the wheel radius (no loaded-radius reduction).
+const TIRE_LONGITUDINAL_STIFFNESS: float = 15.0
+const TIRE_LATERAL_STIFFNESS: float = 10.0
+const TIRE_GRIP_LONGITUDINAL: float = 1.0
+const TIRE_GRIP_LATERAL: float = 1.0
+const TIRE_ROLLING_RESISTANCE: float = 0.015
+const TIRE_ROLLING_RESISTANCE_SPEED: float = 0.2
+const TIRE_LOW_SPEED_REFERENCE: float = 0.5
+
+
+## One prototype tyre for a wheel of the given radius (a fresh object each call).
+static func tire_spec(wheel_radius: float) -> TireSpec:
+	var t: TireSpec = TireSpec.new()
+	t.rolling_radius = wheel_radius
+	t.longitudinal_stiffness = TIRE_LONGITUDINAL_STIFFNESS
+	t.lateral_stiffness = TIRE_LATERAL_STIFFNESS
+	t.grip_longitudinal = TIRE_GRIP_LONGITUDINAL
+	t.grip_lateral = TIRE_GRIP_LATERAL
+	t.rolling_resistance = TIRE_ROLLING_RESISTANCE
+	t.rolling_resistance_speed = TIRE_ROLLING_RESISTANCE_SPEED
+	t.low_speed_reference = TIRE_LOW_SPEED_REFERENCE
+	return t
+
+
+## The ground configuration plus independent front and rear tyres (M2.4.2). A fresh configuration each call.
+static func config_with_tires() -> MotorcycleConfig:
+	var c: MotorcycleConfig = config_with_ground()
+	c.front_tire = tire_spec(c.front_wheel_radius)
+	c.rear_tire = tire_spec(c.rear_wheel_radius)
 	return c
 
 

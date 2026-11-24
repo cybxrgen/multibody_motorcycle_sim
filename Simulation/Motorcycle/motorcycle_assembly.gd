@@ -12,6 +12,7 @@ const PrismaticJoint = preload("res://Simulation/Solver/prismatic_joint_constrai
 const FrontSuspension = preload("res://Simulation/Motorcycle/front_suspension.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
+const TireGroundContact = preload("res://Simulation/Motorcycle/tire_ground_contact.gd")
 
 var world: SimWorld
 ## The configuration the assembly was built from (kept for geometry queries; not re-read by the simulation).
@@ -48,6 +49,10 @@ var rear_suspension: RearSuspension
 var ground: SimRigidBody
 var front_wheel_contact: WheelGroundContact
 var rear_wheel_contact: WheelGroundContact
+## M2.4.2 tyre models: the TireGroundContact of a wheel whose configuration has a tyre (the SAME object as that wheel's contact, so a
+## tyre always references its wheel and its contact); null for a wheel without a tyre.
+var front_tire: TireGroundContact
+var rear_tire: TireGroundContact
 
 
 ## The six bodies: chassis, steering, fork slider, swingarm, front wheel, rear wheel.
@@ -109,6 +114,24 @@ func ground_contacts() -> Array:
 	return [front_wheel_contact, rear_wheel_contact] if has_ground() else []
 
 
+## The tyre models in the order front, rear (a wheel without a tyre is skipped).
+func tires() -> Array:
+	var result: Array = []
+	for tire in [front_tire, rear_tire]:
+		if tire != null:
+			result.append(tire)
+	return result
+
+
+## Enables or disables the tangential response of every tyre (the normal contact stays active: a frictionless contact). Does nothing
+## for a wheel without a tyre. A disabled tyre carries no impulse (they are discarded, so re-enabling starts cold).
+func set_tire_forces_enabled(enabled: bool) -> void:
+	for tire in tires():
+		tire.tire_forces_enabled = enabled
+		if not enabled:
+			tire.reset_warm_start()
+
+
 ## Enables or disables both wheel contacts. Disabling discards their carried impulses (reset_warm_start), so re-enabling starts cold
 ## and a disabled contact can never act. Does nothing without a ground.
 func set_ground_contacts_enabled(enabled: bool) -> void:
@@ -128,4 +151,6 @@ func remove_ground() -> void:
 	world.remove_body(ground)
 	front_wheel_contact = null
 	rear_wheel_contact = null
+	front_tire = null
+	rear_tire = null
 	ground = null
