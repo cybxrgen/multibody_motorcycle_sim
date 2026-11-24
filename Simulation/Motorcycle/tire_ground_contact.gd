@@ -29,6 +29,14 @@ extends "res://Simulation/Motorcycle/wheel_ground_contact.gd"
 ## Why implicit: with an explicit tyre force and the wheel's low inertia about its axle the effective stiffness c R^2 dt / I exceeds 2
 ## for the prototype loads (unstable); the implicit solve is unconditionally stable for the slip stiffness.
 ##
+## ---- Speculative contact is not tyre contact (M2.4.2.1) ----
+## The generic normal row stays active while the wheel has a small positive gap and approaches (speculative bias g/dt, unchanged): its
+## positive impulse is COLLISION PREVENTION, not physical load. The tyre therefore acts only while the wheel is GEOMETRICALLY in
+## contact: gap g (start-of-step geometry) <= TOUCH_TOLERANCE (0.1 mm, inherited from WheelGroundContact; penetration included). While
+## the contact is active but not touching: no tyre warm start, no tangential impulse, no rolling resistance, the carried tyre impulse
+## and rolling-resistance impulse are cleared (no state leaks across the air gap) and normal_load() / the force limits / the
+## utilisation report zero physical load. The normal row, its split-impulse correction and the generic contact are not touched.
+##
 ## ---- Lifecycle ----
 ## The geometry, the tyre axes, the slip rows and the reference speed are re-derived from the start-of-step state at every fixed step
 ## (prepare()). A contact that is inactive (wheel separated or degenerate) discards ALL carried impulses (reset_warm_start()), so no
@@ -60,6 +68,9 @@ var _g01: float = 0.0
 var _g10: float = 0.0
 var _g11: float = 0.0
 var _tire_impulse_world: Vector3 = Vector3.ZERO
+## True when the last prepared step had the wheel geometrically in contact (gap <= TOUCH_TOLERANCE); only then does the tyre act and
+## does the normal impulse count as physical load. False while separated (speculative normal row only) and while inactive.
+var _touching: bool = false
 var _rolling_angular_impulse: float = 0.0  # rolling-resistance angular impulse about the axle u applied in the last step (N m s)
 
 
@@ -110,9 +121,22 @@ func validate() -> PackedStringArray:
 
 # --- Queries (read-only; forces and load are the LAST solved step's results, slip is evaluated from the CURRENT body state) ---
 
-## Normal load of the last solved step (N) = normal impulse / dt. Zero while the contact is inactive or before the first step.
+## PHYSICAL normal load of the last solved step (N) = normal impulse / dt while the wheel is geometrically touching the ground
+## (gap <= TOUCH_TOLERANCE). Zero while the contact is inactive, before the first step, and while the wheel is separated: the
+## positive normal impulse of an active speculative contact is collision prevention (see `speculative_normal_impulse()`), not load.
 func normal_load() -> float:
-	return rows[ROW_NORMAL].accumulated_impulse / _dt if _dt > 0.0 else 0.0
+	return rows[ROW_NORMAL].accumulated_impulse / _dt if _dt > 0.0 and _touching else 0.0
+
+
+## True when the last prepared step had the wheel geometrically in contact, i.e. the tyre was allowed to act.
+func is_touching() -> bool:
+	return _touching
+
+
+## Normal impulse of the generic row in the last solved step (N s) while the wheel is separated and the speculative contact is
+## active: the collision-prevention response. Zero while touching (that impulse is then the physical load, `normal_load()`).
+func speculative_normal_impulse() -> float:
+	return rows[ROW_NORMAL].accumulated_impulse if contact_active and not _touching else 0.0
 
 
 ## Longitudinal axis (forward, projected on the ground) and lateral axis (right) of the last prepared step.
@@ -161,7 +185,7 @@ func lateral_force_limit() -> float:
 
 ## Friction-ellipse utilisation sqrt((Fx/(mu_x N))^2 + (Fy/(mu_y N))^2) of the last step, in [0, 1]; 0 without load.
 func friction_utilization() -> float:
-	var ln: float = rows[ROW_NORMAL].accumulated_impulse
+	var ln: float = rows[ROW_NORMAL].accumulated_impulse if _touching else 0.0
 	if not (ln > 0.0 and _mu_x > 0.0 and _mu_y > 0.0):
 		return 0.0
 	var ux: float = rows[ROW_TANGENT_1].accumulated_impulse / (_mu_x * ln)
@@ -189,6 +213,8 @@ func current_slip() -> Dictionary:
 func _update_rows(dt: float, config) -> void:
 	super._update_rows(dt, config)
 	_dt = dt
+	# Geometric contact of THIS step (start-of-step gap, the one the normal row uses): the tyre acts only then.
+	_touching = _gap <= TOUCH_TOLERANCE
 	var u: Vector3 = (body_b.orientation * WHEEL_AXLE_LOCAL).normalized()
 	var tyre_axes: Dictionary = TireModel.axes(u, _normal)
 	_axes_valid = tyre_axes.valid
@@ -239,6 +265,10 @@ func _prepare_active(dt: float, config) -> void:
 	rows[ROW_TANGENT_1].accumulated_impulse = 0.0
 	rows[ROW_TANGENT_2].accumulated_impulse = 0.0
 	_rolling_angular_impulse = 0.0
+	if not _touching:
+		# Speculative contact across an air gap: no tyre state may survive (cold tyre; the normal row above keeps its generic warm start).
+		_tire_impulse_world = Vector3.ZERO
+		return
 	if not config.warm_starting or not _axes_valid or not tire_forces_enabled:
 		return
 	# Carried tyre impulse: scale, project into the current tangent plane, express in the current tyre axes, scale into the current ellipse.
@@ -271,6 +301,7 @@ func finish() -> void:
 
 func reset_warm_start() -> void:
 	super()
+	_touching = false
 	_tire_impulse_world = Vector3.ZERO
 	_rolling_angular_impulse = 0.0
 
@@ -294,7 +325,7 @@ func _solve_tire() -> void:
 	var cur_x: float = row_x.accumulated_impulse
 	var cur_y: float = row_y.accumulated_impulse
 	var target: Vector2 = Vector2.ZERO
-	if tire_forces_enabled and _axes_valid and ln > 0.0 and _mu_x > 0.0 and _mu_y > 0.0:
+	if _touching and tire_forces_enabled and _axes_valid and ln > 0.0 and _mu_x > 0.0 and _mu_y > 0.0:
 		var s_x: float = _sx_lin.dot(body_b.linear_velocity) + _sx_ang.dot(body_b.angular_velocity)
 		var s_y: float = _sy_lin.dot(body_b.linear_velocity) + _sy_ang.dot(body_b.angular_velocity)
 		var d: float = _reference_speed
@@ -329,7 +360,7 @@ func _solve_tire() -> void:
 ## the amount already applied this step is applied (so it follows the load as the normal row converges, and is never warm started).
 func _solve_rolling_resistance(ln: float) -> void:
 	var target: float = 0.0
-	if tire_forces_enabled and _axes_valid and ln > 0.0:
+	if _touching and tire_forces_enabled and _axes_valid and ln > 0.0:
 		# TireModel.rolling_resistance_force(v, N, c, v_rr) = -c N psi(v / v_rr); the moment about +u opposes a positive spin.
 		target = -TireModel.rolling_resistance_force(tire.rolling_radius * _spin, ln, tire.rolling_resistance, tire.rolling_resistance_speed) * tire.rolling_radius
 	var delta: float = target - _rolling_angular_impulse

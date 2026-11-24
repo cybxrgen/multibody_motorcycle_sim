@@ -225,6 +225,14 @@ func test_g10_cornering_response_to_a_steering_input_is_a_restoring_lateral_forc
 		steer(rig, angle)
 		var u: Vector3 = a.front_wheel.orientation * Vector3.RIGHT
 		a.front_wheel.angular_velocity = -u * (speed / 0.31)
+		# M2.4.2.1: rotating the front end by hand about the raked steering axis lifts the contact point by 0.15 mm, more than the 0.1 mm touch
+		# tolerance, and a tyre does not act across an air gap (the measurement step used to see a force across it). Step until the wheel touches again
+		# (one step, the load of the gap closing) and measure from there; the expectation and every tolerance below are unchanged.
+		var settle_steps: int = 0
+		while a.front_tire.signed_gap() > a.front_tire.TOUCH_TOLERANCE and settle_steps < 5:
+			rig.world.step()
+			settle_steps += 1
+		check(settle_steps <= 2 and a.front_tire.signed_gap() <= a.front_tire.TOUCH_TOLERANCE, "the front wheel touches again within two steps of the steering input (%d)" % settle_steps)
 		var e_x: Vector3 = TireModel.axes(u, Vector3.UP).longitudinal
 		var heading_error: float = acos(clampf(e_x.dot(Vector3(0.0, 0.0, -1.0)), -1.0, 1.0))
 		var front = a.front_tire

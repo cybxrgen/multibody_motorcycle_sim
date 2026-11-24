@@ -22,7 +22,7 @@ M2.1 (rigid assembly) is complete and accepted (PR #10); M2.2 (front telescopic 
 | M2.2 Front suspension (6 bodies, 5 joints; telescopic fork: prismatic joint with travel limits, spring-damper, generic force-provider hook) | Merged (PR #11) |
 | M2.3 Rear suspension (direct spring-damper between chassis and swingarm, 6 bodies, 5 joints unchanged) | Merged (PR #12) |
 | M2.4 Tire–ground contact foundation — M2.4.1 wheel–ground contact (flat static ground, one point contact per wheel, per-step geometry refresh, generic contact solving) | M2.4.1 merged (PR #13) |
-| M2.4.2 Tire behavior (slip, longitudinal/lateral force, combined-slip friction ellipse, rolling resistance on the wheel contacts; simple prototype model) | Implemented; awaiting user review |
+| M2.4.2 Tire behavior (slip, longitudinal/lateral force, combined-slip friction ellipse, rolling resistance on the wheel contacts; simple prototype model; M2.4.2.1 correction: no tyre action across a speculative gap) | Implemented; awaiting user review |
 | M2.5 Further tire/rolling interaction (what M2.4.2 does not cover, e.g. contact patch, relaxation; scope to be defined by the user) | Not started — not authorized |
 | M2.6 Powertrain interaction (engine, clutch, gearbox, final drive) | Not started — not authorized |
 | Integrated M2 validation | Not started — not authorized |

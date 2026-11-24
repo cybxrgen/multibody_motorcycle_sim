@@ -25,7 +25,8 @@ extends "res://Simulation/Solver/contact_constraint.gd"
 const MIN_PLANE_PROJECTION: float = 0.1
 ## Wheel axle in the wheel's own frame (PHYSICS_CONVENTIONS.md: wheel axle = body-local X).
 const WHEEL_AXLE_LOCAL: Vector3 = Vector3.RIGHT
-## |gap| below this counts as touching in contact_state() (diagnostic only; the solver never uses it): 0.1 mm.
+## A wheel with gap <= this (penetration included) is GEOMETRICALLY touching: 0.1 mm. contact_state() reports it, and TireGroundContact
+## (M2.4.2.1) lets the tyre act only then. The generic contact rows (speculative normal, split correction, Coulomb) never use it.
 const TOUCH_TOLERANCE: float = 1.0e-4
 
 const STATE_SEPARATED: String = "separated"
