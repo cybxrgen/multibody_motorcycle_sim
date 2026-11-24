@@ -6,32 +6,29 @@
 Labels: **VERIFIED** (confirmed by inspection/execution), **REPORTED** (stated by an earlier agent, not re-confirmed), **UNVERIFIED** (not checked).
 
 ## 1. Assignment
-M2.4.2.1 — Prevent tire forces during speculative contact: the M2.4.2 tyre treated any positive normal impulse as physical load, so it applied longitudinal and lateral force, rolling resistance and a tangential warm start while the wheel was still separated from the ground inside the speculative activation distance. Smallest targeted correction in the tyre contact, regression tests for the missed boundary, no change to the generic speculative policy, the tyre model, its parameters or the suspension/drivetrain/rider (M2.5/M2.6 not started).
+M2.5.1 — Finite-width tire geometry: replace the zero-width wheel-centreline geometry assumption with an independently testable, motorcycle-specific tyre cross-section (finite configurable width, circular crown profile, per-wheel configuration, lowest point against a plane that responds to camber). Geometry foundation for M2.5.2 only: no contact patch, no solver, contact or tyre-force change. M2.5.2 and later were not started.
 
 ## 2. Git observation at delivery
-- Start (VERIFIED): head of pull request #14 fetched as `refs/pull/14/head`, commit `78ccd46` (M2.4.2, on top of `c31940d`, the merge of PR #13), clean tree, clone of `https://github.com/cybxrgen/multibody_motorcycle_sim`. Work branch `m2/tire-speculative-contact` created from it. One local commit on that branch; not pushed, not merged, no pull request. The commit SHA is in the delivery report.
-- Milestones (separate from Git): M2 in progress; M2.4.1 merged; M2.4.2 and this correction implemented, awaiting the user's review. M2.4 and M2 are not complete or accepted.
+- Start (VERIFIED): clone of `https://github.com/cybxrgen/multibody_motorcycle_sim`, branch `main` at `c9c7a1ad5e7f87d2daac95b30547a9a98638ab92` (merge of PR #16, the documentation reconciliation, so it is applied), clean working tree, `origin/main` identical. Work branch `m2/finite-width-tire-geometry` created from it; one local commit; not pushed, not merged, no pull request. The agent commit SHA and artifact names are in the delivery report.
+- Milestones (separate from Git): M2 in progress; M2.4.x merged; M2.5.1 implemented and awaiting the user's review. M2.5.2, M2.5.3, M2.5.4, M2.6 and the integrated validation are not started and not authorized.
 
 ## 3. What changed
-- **`Simulation/Motorcycle/tire_ground_contact.gd`:** `_touching = gap <= TOUCH_TOLERANCE` (start-of-step gap, the existing 0.1 mm constant of `WheelGroundContact`, penetration included) gates every tyre effect: no tangential warm start (the carried tyre impulse is cleared), zero tangential target, zero rolling-resistance target. `normal_load()`, the force limits and `friction_utilization()` report physical load only while touching. New queries `is_touching()` and `speculative_normal_impulse()`. `reset_warm_start()` clears the flag.
-- **`wheel_ground_contact.gd`:** comment of `TOUCH_TOLERANCE` only. **No change in `Simulation/Core`, `Simulation/Solver`, the generic contact rows, the activation distance, tyre parameters, the friction envelope, the builder or the assembly.**
-- **Tests:** new `Tests/test_tire_speculative_contact.gd` (11 tests: speculative approach for front and rear wheel with the positive normal impulse and the positive gap asserted, fast and slow approach, no warm start across separation and over six speculative steps, actual contact, penetration and the touch boundary, re-contact, natural landing, in-suite old-behaviour mutant). One existing test adapted: `test_motorcycle_tires.gd::test_g10` encoded the defect (a hand-applied steering input leaves a 0.15 mm gap and the test measured a tyre force across it); it now steps until the wheel touches, expectation and tolerances unchanged (`TESTING.md`).
-- **Docs updated:** `PROJECT_STATE.md`, `PHYSICS_CONVENTIONS.md`, `ARCHITECTURE.md`, `TESTING.md`, `PHASE_PLAN.md`, this file. `AGENTS.md` untouched.
+- New `Simulation/Motorcycle/tire_geometry.gd` (`TireGeometry`, with `.uid`): width and crown radius, `validate(wheel_radius)` (single home of the rules), pure static `lowest_point` and `point_at_offset`, `profile_radius`, `shoulder_drop`, `duplicate_spec`. Profile `r(s) = R - rho + sqrt(rho^2 - s^2)`; lowest point at `s = clamp(-rho (n.u), -w/2, w/2)`. Equations: `PHYSICS_CONVENTIONS.md`.
+- `MotorcycleConfig`: optional `front_tire_geometry` / `rear_tire_geometry` (default null) and `_check_tire_geometry` (delegates to `TireGeometry.validate`, rejects a shared object). `MotorcycleBuilder`: stores copies in the new `MotorcycleAssembly.front_tire_geometry` / `rear_tire_geometry` after the existing steps (validation already happens before any registration). Contacts, tyre model, solver, Core and scenes are untouched.
+- New `Tests/test_tire_geometry.gd` (16 tests, with `.uid`). Documentation: `PROJECT_STATE.md`, `ARCHITECTURE.md`, `PHYSICS_CONVENTIONS.md`, `TESTING.md`, `PHASE_PLAN.md`, this file. `AGENTS.md` unchanged.
 
 ## 4. Verification (Godot 4.7.stable.official.5b4e0cb0f, Linux x86_64, headless, no display)
-- VERIFIED baseline on the unchanged PR #14 head: 464 passed, 0 failed, 0 skipped (8931 checks), exit 0.
-- VERIFIED defect on the unfixed code (rear wheel 2 mm above the plane, 2 m/s downward): normal impulse 27.6 N s, longitudinal force -2077 N, lateral force -230 N, rolling moment 15.9 N m, `normal_load()` 3315 N; with the correction the last four are exactly zero.
-- VERIFIED final: 475 passed, 0 failed, 0 skipped (9053 checks), exit 0, no `SCRIPT ERROR`; fresh import (`.godot/` deleted) exit 0, 0 error/warning lines.
-- VERIFIED headless smoke: `motorcycle_test`, `simulation_test`, `main` with `--quit-after 240` exit 0, 0 error/warning lines; `motorcycle_test` with `--fixed-fps 60 --quit-after 9000` exit 0, 0 error/warning lines.
-- UNVERIFIED: graphical inspection (never performed).
+- VERIFIED baseline on unchanged `main`: 475 passed, 0 failed, 0 skipped (9053 checks), exit 0.
+- VERIFIED final: 491 passed, 0 failed, 0 skipped (9422 checks); no existing test, expectation or tolerance changed. Fresh import (`.godot/` deleted) exit 0, 0 error/warning lines. Headless smoke (`--quit-after 240`) of `simulation_test`, `main`, `motorcycle_test` exit 0, 0 error/warning lines; `motorcycle_test` with `--fixed-fps 60 --quit-after 9000` exit 0, 0 error/warning lines.
+- VERIFIED: the one failure seen during development (a 1e-9 tolerance on a float32 axle component) was a test tolerance error and was corrected to the documented 5e-6; no implementation change was needed.
+- UNVERIFIED: graphical inspection (never performed); nothing draws the tyre profile.
 
 ## 5. Findings worth keeping
-- The new tests are only meaningful with an ACTIVE contact, `0 < gap <= activation distance` and a positive speculative impulse; the old suite used heights of 0.15 m and above, where the contact is inactive and discards everything.
-- The generic normal row legitimately warm starts from the speculative impulse, so the first touching step after a speculative one carries about 1 % different load than a fresh contact; the tyre state itself starts cold.
-- A hand-made kinematic change (the steering helper of the tests) can open a sub-millimetre gap; any test that sets state by hand and then expects tyre force on the next step must first make sure the wheel touches.
+- The optimum `s* = -rho (n.u)` is exact and independent of the wheel radius and of the in-plane factor; only the shoulder clamp makes the result depend on width. Camber moves the contact toward the lower end of the axle.
+- The tests use a brute-force search over the whole tread surface as an independent oracle; it resolves the minimum to about 1e-5 m.
 
 ## 6. Unresolved / limitations
-See `PROJECT_STATE.md` ("Tyre model (M2.4.2)"), in particular the new bullet: no tyre action on the landing step, judged from the start-of-step gap; the 0.1 mm tolerance is an illustrative fixture value. Everything else is unchanged.
+See `PROJECT_STATE.md` ("Finite-width tyre geometry (M2.5.1)"): geometry only (the contact still uses the zero-width point), simple symmetric circular crown, bounds are model limits, no prototype sets a geometry, nothing viewed graphically.
 
 ## 7. Next action
-Await the user's review and an explicit assignment for further work (M2.5 and M2.6 are not authorized). The agent does not push or merge.
+Await the user's review and publication of the branch, and an explicit assignment for further work. The agent does not push or merge.
