@@ -13,7 +13,7 @@ suspension, tire model and drivetrain. M1 (generic joints, contacts, split-impul
 **Current milestone: M2.4 — Tire–ground contact foundation (M2.4.1 wheel–ground contact merged; M2.4.2 tire behavior and the M2.4.2.1 speculative-contact correction implemented, accepted and merged).** M2.4.1 added a flat static ground and one point contact per wheel
 (`Simulation/Motorcycle/wheel_ground_contact.gd`) that re-derives its geometry at every fixed step and is solved by the generic `ContactConstraint`. M2.4.2 added a simple tyre model on those contacts (longitudinal and lateral slip, friction-ellipse combined slip, rolling resistance) with the tyre as the only owner of the tangential response; M2.4.2.1 corrected it so that the tyre does not act across the air gap of a speculative contact. Neither adds a body, a joint, an engine or a drivetrain.
 What exists and how it was verified: `PROJECT_STATE.md`. M2.4.2 and M2.4.2.1 are **not** all of M2.4 beyond what the user decides, and they are not M2 and do not complete it: M2 remains in progress.
-M2.5.1 (finite-width tyre geometry: a motorcycle-specific tyre cross-section and its lowest point against a plane; geometry only, contact and tyre forces unchanged) is implemented and awaits the user's review; M2.5.2 and later are not started.
+M2.5.1 (finite-width tyre geometry: a motorcycle-specific tyre cross-section and its lowest point against a plane; geometry only, contact and tyre forces unchanged) and its M2.5.1.1 validation hardening are implemented, accepted and merged (PR #17). The explicitly authorized presentation-only geometry wireframe (M2.5.1.2, with the M2.5.1.2.1 box-refresh correction) is implemented and awaits the user's review (PR #18). M2.5.2 and later are not started.
 M2.1 (rigid assembly) is complete and accepted (PR #10); M2.2 (front telescopic suspension, PR #11), M2.3 (rear suspension, PR #12), M2.4.1 (PR #13) and M2.4.2 with M2.4.2.1 (PR #15) are merged into `main`.
 
 ### Milestones
@@ -25,7 +25,8 @@ M2.1 (rigid assembly) is complete and accepted (PR #10); M2.2 (front telescopic 
 | M2.4 Tire–ground contact foundation — M2.4.1 wheel–ground contact (flat static ground, one point contact per wheel, per-step geometry refresh, generic contact solving) | M2.4.1 merged (PR #13) |
 | M2.4.2 Tire behavior (slip, longitudinal/lateral force, combined-slip friction ellipse, rolling resistance on the wheel contacts; simple prototype model) | Implemented, reviewed, accepted and merged (PR #15) |
 | M2.4.2.1 Tire speculative-contact correction (no tyre action across the air gap of a speculative contact) | Implemented, reviewed, accepted and merged (PR #15) |
-| M2.5.1 Finite-width tire geometry (motorcycle-specific tyre cross-section, lowest point against a plane with camber, per-wheel configuration; geometry only) | Implemented, awaiting user review and publication |
+| M2.5.1 Finite-width tire geometry (motorcycle-specific tyre cross-section, lowest point against a plane with camber, per-wheel configuration; geometry only), with M2.5.1.1 validation hardening | Implemented, accepted and merged (PR #17) |
+| M2.5.1.2 Toggleable geometry wireframe (presentation only: oriented body boxes and finite-width tyre surfaces, key G), with M2.5.1.2.1 runtime box-dimension refresh | Implemented, awaiting user review (PR #18); explicitly authorized increment, not a physics milestone |
 | M2.5.2 Discrete contact-patch approximation | Not started — not authorized |
 | M2.5.3 Tire-force integration | Not started — not authorized |
 | M2.5.4 Further tire/rolling interaction (scope to be defined by the user) | Not started — not authorized |
