@@ -185,15 +185,15 @@ func test_f_camber_lowest_sample_matches_the_reference_lowest_point() -> void:
 	# Two sources, both bounded over the test domain:
 	#  - Lateral (curvature term). The grid is uniform in the meridian angle phi, with phi* = asin(-a) = -0.25 and spacing
 	#    d = 2 asin(w/2rho)/63 = 3.55e-2 rad. The nearest node n lies in the interval [phi* - d/2, phi* + d/2], whose image under
-	#    s = rho sin(phi) is I_s = [-0.026459, -0.023014] m. Its largest distance from s* is delta = 1.726e-3 m. Over I_s the
-	#    curvature h''(s) = L rho^2 / (rho^2 - s^2)^(3/2) is largest at the end nearest the tyre shoulder: max |h''| = 10.80 1/m
-	#    (rho^2 - s^2 >= 9.30e-3 m^2 on I_s; it is NOT the value at s = 0, which is 9.7 1/m). Taylor with h'(s*) = 0 and the
-	#    mean-value remainder gives 0 <= h(s_n) - h(s*) <= (1/2) max_I|h''| delta^2 = 0.5 * 10.80 * (1.726e-3)^2 = 1.61e-5 m.
+	#    s = rho sin(phi) is I_s = [-0.026459, -0.023014] m. Its largest distance from s* is delta <= 1.726e-3 m (exact 1.72597e-3). Over I_s the
+	#    curvature h''(s) = L rho^2 / (rho^2 - s^2)^(3/2) is largest at the end nearest the tyre shoulder: max |h''| <= 10.81 1/m (exact 10.8035)
+	#    (rho^2 - s^2 >= 9.29e-3 m^2 on I_s, exact 9.29994e-3; it is NOT the value at s = 0, which is 9.7 1/m). Taylor with h'(s*) = 0 and the
+	#    mean-value remainder gives 0 <= h(s_n) - h(s*) <= (1/2) max_I|h''| delta^2 <= 0.5 * 10.81 * (1.726e-3)^2 = 1.611e-5 m.
 	#    Check: the exact difference at both ends of I_s is 1.58e-5 m, inside the bound.
 	#  - Angular (height). The nearest meridian is at most half a step, 2 pi / 256 / 2 = 1.227e-2 rad, from the optimal e. For
 	#    fixed s, moving e by delta raises the height by r L (1 - cos delta), since n . e(theta) = -L cos(delta) at the best e.
-	#    With r <= R = 0.31 m and L <= 1: r L (1 - cos delta) <= 0.31 * (1 - cos 1.227e-2) = 2.33e-5 m.
-	#  Combined height error: 1.61e-5 + 2.33e-5 = 3.94e-5 m, which is below the 1e-4 m tolerance on the gap by a factor of 2.5.
+	#    With r <= R = 0.31 m and L <= 1: r L (1 - cos delta) <= 0.31 * (1 - cos 1.227e-2) <= 2.335e-5 m (exact 2.3342e-5).
+	#  Combined height error: 1.611e-5 + 2.335e-5 <= 3.946e-5 m, which is below the 1e-4 m tolerance on the gap by a factor of at least 2.5.
 	#  The first check (grid minimum not below the true minimum) holds by construction, and the second (within 1e-4 m) holds by the
 	#  bound above, so both assertions below are covered by these estimates; no tolerance was changed.
 	# The lateral POSITION of the lowest sample is a different quantity (metres along the axle, not height). Its check below
