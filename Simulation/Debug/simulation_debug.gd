@@ -35,13 +35,18 @@ func update_overlay(alpha: float) -> void:
 				draw.axes(t, 0.4)
 		if show_anchors:
 			for c in world.constraints:
+				# An inactive contact (separated corner / wheel) keeps stale anchors from its last active step: not drawn.
+				if "contact_active" in c and not c.contact_active:
+					continue
 				if "local_anchor_a" in c:
 					var pa: Vector3 = body_transform(c.body_a, alpha) * c.local_anchor_a
 					var pb: Vector3 = body_transform(c.body_b, alpha) * c.local_anchor_b
 					draw.cross(pa, 0.05, Color(1, 0.4, 1))
 					draw.cross(pb, 0.08, Color(0, 1, 1))
-					draw.line(body_transform(c.body_a, alpha).origin, pa, Color(1, 0.4, 1, 0.6))
-					draw.line(body_transform(c.body_b, alpha).origin, pb, Color(0, 1, 1, 0.6))
+					if not c.body_a.is_static():
+						draw.line(body_transform(c.body_a, alpha).origin, pa, Color(1, 0.4, 1, 0.6))
+					if not c.body_b.is_static():
+						draw.line(body_transform(c.body_b, alpha).origin, pb, Color(0, 1, 1, 0.6))
 	draw.flush()
 
 

@@ -27,6 +27,8 @@ const SuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_suspensio
 const RearSuspensionSpec = preload("res://Simulation/Motorcycle/motorcycle_rear_suspension_spec.gd")
 const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
 const TireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
+const CollisionBox = preload("res://Simulation/Motorcycle/motorcycle_collision_box.gd")
+const ControlSpec = preload("res://Simulation/Motorcycle/motorcycle_control_spec.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
@@ -81,6 +83,18 @@ var rear_tire: TireSpec = null
 var front_tire_geometry: TireGeometry = null
 var rear_tire_geometry: TireGeometry = null
 
+## Optional PHYSICAL oriented-box collision geometry of the four structural bodies (M2.5.2); null (the default) = that body has no collision
+## geometry. Independent of `visual_size` (presentation) and of the tyre geometry. The wheels have none: tyre contact is their sole ground
+## contact. With a ground, the builder registers eight corner contacts (BoxGroundContact) per configured box. Each box names its owner
+## (`body_name` must equal the slot) and must be a distinct object. Rules: MotorcycleCollisionBox.validate plus the COM-inside-box rule below.
+var chassis_box: CollisionBox = null
+var steering_box: CollisionBox = null
+var fork_slider_box: CollisionBox = null
+var swingarm_box: CollisionBox = null
+
+## Optional basic direct controls (M2.5.2): limits of throttle, brake and steering. null (the default) registers no control component.
+var controls: ControlSpec = null
+
 ## Wheel proxy / geometry dimensions (m). Used by presentation and by wheel_inertia() in fixtures; the physical
 ## quantity is `local_inertia` of the wheel body spec.
 var front_wheel_radius: float = 0.0
@@ -92,6 +106,11 @@ var rear_wheel_width: float = 0.0
 ## The six body specs in the fixed order chassis, steering, fork slider, swingarm, front wheel, rear wheel.
 func body_specs() -> Array:
 	return [chassis, steering, fork_slider, swingarm, front_wheel, rear_wheel]
+
+
+## The four collision-box slots in the fixed order chassis, steering, fork slider, swingarm (null where not configured).
+func collision_boxes() -> Array:
+	return [chassis_box, steering_box, fork_slider_box, swingarm_box]
 
 
 ## The four HINGE specs in the fixed order steering head, swingarm pivot, front axle, rear axle (the prismatic joint is
@@ -165,6 +184,9 @@ func validate() -> PackedStringArray:
 	_check_ground(errors)
 	_check_tires(errors)
 	_check_tire_geometry(errors)
+	_check_collision_boxes(errors)
+	if controls != null:
+		errors.append_array(controls.validate())
 	return errors
 
 
@@ -296,3 +318,21 @@ func _check_tire_geometry(errors: PackedStringArray) -> void:
 		if pair[0] != null:
 			for message in pair[0].validate(pair[1] if is_finite(pair[1]) else 0.0):
 				errors.append("%s %s" % [pair[2], message])
+
+
+## Collision-box rules (M2.5.2): every configured box is valid, names the body of its slot (so a wheel or another body can never be its owner),
+## is a distinct object, and contains the body's COM (the body frame origin) so the geometry and the mass distribution agree on one frame.
+func _check_collision_boxes(errors: PackedStringArray) -> void:
+	var slots: Array = [["chassis", chassis_box], ["steering", steering_box], ["fork_slider", fork_slider_box], ["swingarm", swingarm_box]]
+	for k in slots.size():
+		var box = slots[k][1]
+		if box == null:
+			continue
+		errors.append_array(box.validate())
+		if box.body_name != slots[k][0]:
+			errors.append("collision box of slot '%s' names owner '%s'" % [slots[k][0], box.body_name])
+		elif box.validate().is_empty() and not box.contains_body_origin():
+			errors.append("collision box of '%s' does not contain the body's centre of mass (centre %s, size %s)" % [box.body_name, box.center, box.size])
+		for j in range(k + 1, slots.size()):
+			if slots[j][1] == box:
+				errors.append("collision boxes of '%s' and '%s' must be independent objects" % [slots[k][0], slots[j][0]])

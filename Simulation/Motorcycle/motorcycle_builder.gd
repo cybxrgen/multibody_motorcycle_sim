@@ -30,6 +30,8 @@ const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.
 const MotorcycleAssembly = preload("res://Simulation/Motorcycle/motorcycle_assembly.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const TireGroundContact = preload("res://Simulation/Motorcycle/tire_ground_contact.gd")
+const BoxGroundContact = preload("res://Simulation/Motorcycle/box_ground_contact.gd")
+const MotorcycleControls = preload("res://Simulation/Motorcycle/motorcycle_controls.gd")
 
 ## Construction self-check: world anchors of a hinge must agree within this distance. Pivot coordinates of order 1 m carry
 ## float32 rounding of ~1e-7 m per operation (local = R^-1 (P - x), world = x + R local: a few operations), so honest
@@ -176,6 +178,43 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 		assembly.front_tire_geometry = config.front_tire_geometry.duplicate_spec()
 	if config.rear_tire_geometry != null:
 		assembly.rear_tire_geometry = config.rear_tire_geometry.duplicate_spec()
+
+	# 3e. Physical collision boxes (M2.5.2): independent copies stored in the assembly. With a ground, eight corner contacts per box
+	# (the generic ContactConstraint; the wheels get none: the tyre contact stays their sole ground contact).
+	var box_names: Array = ["chassis", "steering", "fork_slider", "swingarm"]
+	var box_specs: Array = config.collision_boxes()
+	for k in box_names.size():
+		if box_specs[k] == null:
+			continue
+		var box = box_specs[k].duplicate_spec()
+		assembly.collision_boxes[box_names[k]] = box
+		if config.ground == null:
+			continue
+		var box_body: SimRigidBody = assembly.box_body(box_names[k])
+		var slots: Array = []
+		for corner in BoxGroundContact.CORNER_COUNT:
+			var slot = BoxGroundContact.create(assembly.ground, box_body, box, corner, config.ground.point, config.ground.normal, config.ground.activation_distance)
+			if slot == null:
+				return _fail(target, added_bodies, added_constraints, added_providers, "the box-ground contact of '%s' corner %d could not be created" % [box_names[k], corner])
+			if target.add_constraint(slot) == null:
+				return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the box-ground contact of '%s' corner %d" % [box_names[k], corner])
+			added_constraints.append(slot)
+			slots.append(slot)
+		assembly.box_contacts[box_names[k]] = slots
+
+	# 3f. Basic controls (M2.5.2): one force provider; the steering limit (when configured) goes on the steering hinge.
+	if config.controls != null:
+		var controls = MotorcycleControls.create(assembly, config.controls)
+		if controls == null:
+			return _fail(target, added_bodies, added_constraints, added_providers, "the controls could not be created from the configured limits")
+		if target.add_force_provider(controls) == null:
+			return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the controls")
+		added_providers.append(controls)
+		assembly.controls = controls
+		if config.controls.steering_limit > 0.0:
+			assembly.steering_joint.limit_enabled = true
+			assembly.steering_joint.lower_limit = -config.controls.steering_limit
+			assembly.steering_joint.upper_limit = config.controls.steering_limit
 
 	# 4. Self-check of the construction contract (coincident anchors, aligned axes).
 	var contract_error: String = construction_error(assembly)
