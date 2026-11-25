@@ -21,6 +21,13 @@ extends Node3D
 ## shoulder to shoulder (the crown is among them when PROFILE_SEGMENTS is even) with CIRCUMFERENTIAL_SEGMENTS segments each, plus
 ## MERIDIANS lines across the profile. Per frame only the node's transform is set (the wheel pose), nothing is rebuilt or allocated.
 ##
+## ---- Refresh when dimensions change ----
+## Every box and every tyre surface keeps the SIGNATURE of the source dimensions its current geometry was built from: a box
+## [half extents x y z, centre x y z] (body frame), a tyre [width, crown radius, wheel radius]. update_wireframe() compares the current
+## source dimensions with the stored signature (same_signature(): every component within DIMENSION_TOLERANCE, so float32 rounding of a
+## recomputed size is not a change but any real change is) and rebuilds ONLY the item whose signature changed. Pose is not part of any
+## signature: the world transform of every item is set each frame from the published state, independently of geometry rebuilds.
+##
 ## Safe by construction: a missing body, a missing or invalid geometry or a non-finite dimension skips that item with an entry in
 ## `diagnostics` (and one warning in the log when `log_diagnostics` is true); it never raises.
 
@@ -31,6 +38,12 @@ const CIRCUMFERENTIAL_SEGMENTS: int = 48
 const PROFILE_SEGMENTS: int = 12
 const MERIDIANS: int = 16
 const LINE_SEGMENTS_PER_TIRE: int = (PROFILE_SEGMENTS + 1) * CIRCUMFERENTIAL_SEGMENTS + MERIDIANS * PROFILE_SEGMENTS
+
+## Two signatures are equal when every component differs by at most this (m): 0.1 micrometre, above the float32 rounding of a
+## sub-metre dimension (about 6e-8) and far below any intended dimension change.
+const DIMENSION_TOLERANCE: float = 1.0e-7
+## The six bodies in the order their boxes are built.
+const BODY_NAMES: Array = ["chassis", "steering", "fork_slider", "swingarm", "front_wheel", "rear_wheel"]
 
 const BOX_COLOR: Color = Color(0.95, 0.95, 0.95, 0.9)
 const FRONT_TIRE_COLOR: Color = Color(0.35, 1.0, 0.55, 0.9)
@@ -44,7 +57,8 @@ var diagnostics: PackedStringArray = PackedStringArray()
 var log_diagnostics: bool = true
 
 var _assembly = null
-## One entry per box: {name, body, instance}; one per tyre: {name, body, side, instance, signature}.
+## One entry per body: {name, body, instance, signature}; one per tyre: {name, body, side, instance, signature}. An instance is null while
+## the item is skipped (unavailable body or invalid dimensions); its slot stays so a later valid state is picked up.
 var _boxes: Array = []
 var _tires: Array = []
 
@@ -71,10 +85,9 @@ func setup(assembly) -> void:
 	if assembly == null:
 		_note("geometry wireframe: no assembly")
 		return
-	for entry in bounds_entries(assembly, self):
-		var body = entry.body
-		var instance: MeshInstance3D = _make_instance(box_line_vertices(entry.half_extents, entry.center), BOX_COLOR)
-		_boxes.append({"name": entry.name, "body": body, "instance": instance})
+	for body_name in BODY_NAMES:
+		_boxes.append({"name": body_name, "body": null, "instance": null, "signature": null})
+		_refresh_box(_boxes[_boxes.size() - 1])
 	for side in ["front", "rear"]:
 		_tires.append({"name": side + "_tire", "body": assembly.front_wheel if side == "front" else assembly.rear_wheel, "side": side,
 			"instance": null, "signature": null})
@@ -87,14 +100,20 @@ func update_wireframe(alpha: float) -> void:
 	if not enabled or _assembly == null:
 		return
 	for item in _boxes:
+		_refresh_box(item)  # cheap signature compare; rebuilds only after a dimension change
 		_place(item, alpha)
 	for item in _tires:
-		_refresh_tire(item)  # cheap signature compare; rebuilds only after a dimension change
+		_refresh_tire(item)  # same for the tyre surfaces
 		_place(item, alpha)
 
 
+## Boxes that currently have a mesh.
 func box_count() -> int:
-	return _boxes.size()
+	var count: int = 0
+	for item in _boxes:
+		if item.instance != null:
+			count += 1
+	return count
 
 
 ## Tyres that currently have a surface mesh.
@@ -122,6 +141,21 @@ func tire_instance(side: String):
 	return null
 
 
+## The stored dimension signature of a box (by body name) or a tyre ("front" / "rear"): [] when unknown or skipped. A copy.
+func box_signature(body_name: String) -> Array:
+	for item in _boxes:
+		if item.name == body_name:
+			return (item.signature as Array).duplicate() if item.signature != null else []
+	return []
+
+
+func tire_signature(side: String) -> Array:
+	for item in _tires:
+		if item.side == side:
+			return (item.signature as Array).duplicate() if item.signature != null else []
+	return []
+
+
 func _place(item: Dictionary, alpha: float) -> void:
 	var instance = item.instance
 	var body = item.body
@@ -139,7 +173,7 @@ func _refresh_tire(item: Dictionary) -> void:
 	var geometry = _assembly.front_tire_geometry if item.side == "front" else _assembly.rear_tire_geometry
 	var radius: float = _assembly.config.front_wheel_radius if item.side == "front" else _assembly.config.rear_wheel_radius
 	var signature: Array = [] if geometry == null else [geometry.width, geometry.crown_radius, radius]
-	if signature == item.signature and (item.instance != null or geometry == null):
+	if item.signature != null and same_signature(signature, item.signature) and (item.instance != null or geometry == null):
 		return
 	item.signature = signature
 	if item.instance != null:
@@ -158,6 +192,25 @@ func _refresh_tire(item: Dictionary) -> void:
 		_note("geometry wireframe: %s geometry is invalid for wheel radius %s; skipped" % [item.name, radius])
 		return
 	item.instance = _make_instance(vertices, FRONT_TIRE_COLOR if item.side == "front" else REAR_TIRE_COLOR)
+
+
+## (Re)builds one box when its source dimensions changed (or it was never built); the body reference is re-read every call.
+func _refresh_box(item: Dictionary) -> void:
+	var entry: Dictionary = bound_entry(_assembly, item.name, self)
+	item.body = entry.body if not entry.is_empty() else null
+	var signature: Array = [] if entry.is_empty() else [entry.half_extents.x, entry.half_extents.y, entry.half_extents.z,
+		entry.center.x, entry.center.y, entry.center.z]
+	if item.signature != null and same_signature(signature, item.signature) and (item.instance != null or entry.is_empty()):
+		return
+	item.signature = signature
+	if item.instance != null:
+		if is_instance_valid(item.instance):
+			remove_child(item.instance)
+			item.instance.free()
+		item.instance = null
+	if entry.is_empty():
+		return  # bound_entry already reported why
+	item.instance = _make_instance(box_line_vertices(entry.half_extents, entry.center), BOX_COLOR)
 
 
 func _make_instance(vertices: PackedVector3Array, color: Color) -> MeshInstance3D:
@@ -211,33 +264,59 @@ static func bounds_entries(assembly, reporter = null) -> Array:
 	if assembly == null or assembly.config == null:
 		_report(reporter, "geometry wireframe: assembly or configuration unavailable")
 		return entries
+	for body_name in BODY_NAMES:
+		var entry: Dictionary = bound_entry(assembly, body_name, reporter)
+		if not entry.is_empty():
+			entries.append(entry)
+	return entries
+
+
+## The box of ONE body by name (see BODY_NAMES), computed from the assembly's current configuration; {} (with a message to
+## `reporter`) when the body or its dimensions are unavailable or invalid.
+static func bound_entry(assembly, body_name: String, reporter = null) -> Dictionary:
+	if assembly == null or assembly.config == null:
+		_report(reporter, "geometry wireframe: assembly or configuration unavailable")
+		return {}
 	var config = assembly.config
-	var box_bodies: Array = [["chassis", assembly.chassis, config.chassis], ["steering", assembly.steering, config.steering],
-		["fork_slider", assembly.fork_slider, config.fork_slider], ["swingarm", assembly.swingarm, config.swingarm]]
-	for item in box_bodies:
-		var spec = item[2]
-		if item[1] == null or spec == null:
-			_report(reporter, "geometry wireframe: body '%s' unavailable; no bounding box" % item[0])
-			continue
+	var box_bodies: Dictionary = {"chassis": [assembly.chassis, config.chassis], "steering": [assembly.steering, config.steering],
+		"fork_slider": [assembly.fork_slider, config.fork_slider], "swingarm": [assembly.swingarm, config.swingarm]}
+	if box_bodies.has(body_name):
+		var body = box_bodies[body_name][0]
+		var spec = box_bodies[body_name][1]
+		if body == null or spec == null:
+			_report(reporter, "geometry wireframe: body '%s' unavailable; no bounding box" % body_name)
+			return {}
 		var size: Vector3 = spec.visual_size
 		if not (size.is_finite() and size.x > 0.0 and size.y > 0.0 and size.z > 0.0):
-			_report(reporter, "geometry wireframe: body '%s' has no valid size (%s); no bounding box" % [item[0], size])
-			continue
-		entries.append({"name": item[0], "body": item[1], "center": Vector3.ZERO, "half_extents": size * 0.5, "source": "body spec size"})
-	for side in ["front", "rear"]:
-		var body = assembly.front_wheel if side == "front" else assembly.rear_wheel
-		var geometry = assembly.front_tire_geometry if side == "front" else assembly.rear_tire_geometry
-		var radius: float = config.front_wheel_radius if side == "front" else config.rear_wheel_radius
-		var width: float = geometry.width if geometry != null else (config.front_wheel_width if side == "front" else config.rear_wheel_width)
-		var source: String = "tire geometry width, wheel radius" if geometry != null else "wheel width, wheel radius"
-		if body == null:
-			_report(reporter, "geometry wireframe: %s wheel unavailable; no bounding box" % side)
-			continue
-		if not (is_finite(radius) and radius > 0.0 and is_finite(width) and width > 0.0):
-			_report(reporter, "geometry wireframe: %s wheel has no valid dimensions (radius %s, width %s); no bounding box" % [side, radius, width])
-			continue
-		entries.append({"name": side + "_wheel", "body": body, "center": Vector3.ZERO, "half_extents": Vector3(0.5 * width, radius, radius), "source": source})
-	return entries
+			_report(reporter, "geometry wireframe: body '%s' has no valid size (%s); no bounding box" % [body_name, size])
+			return {}
+		return {"name": body_name, "body": body, "center": Vector3.ZERO, "half_extents": size * 0.5, "source": "body spec size"}
+	if body_name != "front_wheel" and body_name != "rear_wheel":
+		_report(reporter, "geometry wireframe: unknown body '%s'" % body_name)
+		return {}
+	var side: String = "front" if body_name == "front_wheel" else "rear"
+	var wheel = assembly.front_wheel if side == "front" else assembly.rear_wheel
+	var geometry = assembly.front_tire_geometry if side == "front" else assembly.rear_tire_geometry
+	var radius: float = config.front_wheel_radius if side == "front" else config.rear_wheel_radius
+	var width: float = geometry.width if geometry != null else (config.front_wheel_width if side == "front" else config.rear_wheel_width)
+	var source: String = "tire geometry width, wheel radius" if geometry != null else "wheel width, wheel radius"
+	if wheel == null:
+		_report(reporter, "geometry wireframe: %s wheel unavailable; no bounding box" % side)
+		return {}
+	if not (is_finite(radius) and radius > 0.0 and is_finite(width) and width > 0.0):
+		_report(reporter, "geometry wireframe: %s wheel has no valid dimensions (radius %s, width %s); no bounding box" % [side, radius, width])
+		return {}
+	return {"name": body_name, "body": wheel, "center": Vector3.ZERO, "half_extents": Vector3(0.5 * width, radius, radius), "source": source}
+
+
+## True when two signatures have the same length and every component differs by at most DIMENSION_TOLERANCE (NaN never matches).
+static func same_signature(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for k in a.size():
+		if not (absf(a[k] - b[k]) <= DIMENSION_TOLERANCE):
+			return false
+	return true
 
 
 static func _report(reporter, message: String) -> void:

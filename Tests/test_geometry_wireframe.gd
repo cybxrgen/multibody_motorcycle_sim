@@ -455,3 +455,167 @@ func test_simulation_is_identical_with_the_visualization_on_and_off() -> void:
 	check(assembly_a.front_wheel_contact.normal_load() == assembly_b.front_wheel_contact.normal_load(), "contact results are identical")
 	free_wireframe(w)
 	free_wireframe(w_c)
+
+
+# --- Runtime dimension refresh (M2.5.1.2.1) ---
+
+## Local vertices of an instance's mesh (before the instance transform).
+func mesh_vertices(instance: MeshInstance3D) -> PackedVector3Array:
+	return instance.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+
+
+## Per-axis [min, max] of a vertex list, as [Vector3 min, Vector3 max].
+func extents(vertices: PackedVector3Array) -> Array:
+	var low: Vector3 = Vector3(INF, INF, INF)
+	var high: Vector3 = Vector3(-INF, -INF, -INF)
+	for v in vertices:
+		low = Vector3(minf(low.x, v.x), minf(low.y, v.y), minf(low.z, v.z))
+		high = Vector3(maxf(high.x, v.x), maxf(high.y, v.y), maxf(high.z, v.z))
+	return [low, high]
+
+
+func check_signature(actual: Array, expected: Array, message: String) -> void:
+	check(actual.size() == expected.size(), "%s: signature length %d (expected %d)" % [message, actual.size(), expected.size()])
+	for k in mini(actual.size(), expected.size()):
+		check_near(actual[k], expected[k], 1.0e-7, "%s: component %d" % [message, k])
+
+
+## The actual runtime path: build, enable, update every frame; then change ONE tyre's width in the assembly's geometry object (the
+## object the visualization reads each frame) and call update_wireframe() again. Expected numbers are written here: front tyre width
+## 0.12 -> 0.10 m, crown radius 0.07 m, wheel radius 0.31 m; rear tyre 0.18 m / 0.10 m / 0.32 m.
+func test_changing_one_tire_width_at_runtime_refreshes_only_that_wheel() -> void:
+	var assembly = make_assembly()
+	var w: GeometryWireframe = make_wireframe(assembly)
+	w.set_enabled(true)
+	var front_pose: Transform3D = Transform3D(Basis(Quaternion(Vector3(0, 0, 1), 0.2)), Vector3(0.1, 0.35, -0.6))
+	var rear_pose: Transform3D = Transform3D(Basis(Quaternion(Vector3(0, 1, 0), 0.4)), Vector3(-0.2, 0.33, 0.8))
+	set_pose(assembly.front_wheel, front_pose.origin, front_pose.basis.get_rotation_quaternion())
+	set_pose(assembly.rear_wheel, rear_pose.origin, rear_pose.basis.get_rotation_quaternion())
+	w.update_wireframe(1.0)
+
+	# Initial state: sources, signatures, meshes.
+	check_signature(w.tire_signature("front"), [0.12, 0.07, 0.31], "initial front tyre")
+	check_signature(w.tire_signature("rear"), [0.18, 0.10, 0.32], "initial rear tyre")
+	check_signature(w.box_signature("front_wheel"), [0.06, 0.31, 0.31, 0.0, 0.0, 0.0], "initial front box")
+	check_signature(w.box_signature("rear_wheel"), [0.09, 0.32, 0.32, 0.0, 0.0, 0.0], "initial rear box")
+	var front_tire_mesh = w.tire_instance("front").mesh
+	var rear_tire_mesh = w.tire_instance("rear").mesh
+	var front_box_mesh = w.box_instance("front_wheel").mesh
+	var rear_box_mesh = w.box_instance("rear_wheel").mesh
+	var other_meshes: Dictionary = {}
+	for name in ["chassis", "steering", "fork_slider", "swingarm"]:
+		other_meshes[name] = w.box_instance(name).mesh
+	var rear_tire_vertices: PackedVector3Array = mesh_vertices(w.tire_instance("rear")).duplicate()
+	var rear_box_vertices: PackedVector3Array = mesh_vertices(w.box_instance("rear_wheel")).duplicate()
+	var rear_tire_signature: Array = w.tire_signature("rear")
+	var rear_box_signature: Array = w.box_signature("rear_wheel")
+	var front_box_x: Array = extents(front_box_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX])
+	check_near(front_box_x[1].x, 0.06, 1.0e-6, "the front box starts 0.12 m wide")
+
+	# Repeated updates with nothing changed rebuild nothing (and keep the transforms current).
+	for k in 50:
+		w.update_wireframe(1.0)
+	check(w.tire_instance("front").mesh == front_tire_mesh and w.box_instance("front_wheel").mesh == front_box_mesh, "no rebuild without a change (front)")
+	check(w.tire_instance("rear").mesh == rear_tire_mesh and w.box_instance("rear_wheel").mesh == rear_box_mesh, "no rebuild without a change (rear)")
+	# A change below the tolerance (float32-sized noise) is not a change.
+	assembly.front_tire_geometry.width = 0.12 + 1.0e-9
+	w.update_wireframe(1.0)
+	check(w.tire_instance("front").mesh == front_tire_mesh and w.box_instance("front_wheel").mesh == front_box_mesh, "a 1e-9 m change does not rebuild")
+
+	var front_tire_transform: Transform3D = w.tire_instance("front").transform
+	var front_box_transform: Transform3D = w.box_instance("front_wheel").transform
+	var rear_tire_transform: Transform3D = w.tire_instance("rear").transform
+	var rear_box_transform: Transform3D = w.box_instance("rear_wheel").transform
+
+	# The change: ONLY the front tyre width, to another valid value; crown radius and the rear tyre untouched.
+	assembly.front_tire_geometry.width = 0.10
+	w.update_wireframe(1.0)
+
+	# Front tyre surface: rebuilt, spans the new width, agrees with the profile (closed form written here), signature updated.
+	var front_tire_instance: MeshInstance3D = w.tire_instance("front")
+	check(front_tire_instance.mesh != front_tire_mesh, "the front tyre surface was rebuilt")
+	var front_vertices: PackedVector3Array = mesh_vertices(front_tire_instance)
+	var front_extent: Array = extents(front_vertices)
+	check_near(front_extent[0].x, -0.05, 1.0e-6, "front surface reaches the new left shoulder")
+	check_near(front_extent[1].x, 0.05, 1.0e-6, "and the new right shoulder")
+	var worst: float = 0.0
+	for p in front_vertices:
+		worst = maxf(worst, absf(sqrt(p.y * p.y + p.z * p.z) - (0.31 - 0.07 + sqrt(0.07 * 0.07 - p.x * p.x))))
+	check(worst < TOL, "front vertices lie on the configured profile (worst %s)" % worst)
+	check_signature(w.tire_signature("front"), [0.10, 0.07, 0.31], "front tyre after the change")
+
+	# Front bounding box: rebuilt with the new local dimensions (half extents 0.05 x 0.31 x 0.31) and a new signature.
+	var front_box_instance: MeshInstance3D = w.box_instance("front_wheel")
+	check(front_box_instance.mesh != front_box_mesh, "the front bounding box was rebuilt")
+	var box_extent: Array = extents(mesh_vertices(front_box_instance))
+	check_vec3_near(box_extent[0], Vector3(-0.05, -0.31, -0.31), 1.0e-6, "front box minimum corner (local)")
+	check_vec3_near(box_extent[1], Vector3(0.05, 0.31, 0.31), 1.0e-6, "front box maximum corner (local)")
+	check(mesh_vertices(front_box_instance).size() == 24, "still 12 edges")
+	check_signature(w.box_signature("front_wheel"), [0.05, 0.31, 0.31, 0.0, 0.0, 0.0], "front box after the change")
+
+	# Rear tyre and rear box: same mesh objects, same vertices, same signatures.
+	check(w.tire_instance("rear").mesh == rear_tire_mesh, "the rear tyre surface was not rebuilt")
+	check(w.box_instance("rear_wheel").mesh == rear_box_mesh, "the rear bounding box was not rebuilt")
+	check(mesh_vertices(w.tire_instance("rear")) == rear_tire_vertices, "rear tyre vertices unchanged")
+	check(mesh_vertices(w.box_instance("rear_wheel")) == rear_box_vertices, "rear box vertices unchanged")
+	check(w.tire_signature("rear") == rear_tire_signature and w.box_signature("rear_wheel") == rear_box_signature, "rear signatures unchanged")
+	check_vec3_near(extents(rear_box_vertices)[1], Vector3(0.09, 0.32, 0.32), 1.0e-6, "rear box is still 0.18 m wide, radius 0.32")
+	for name in other_meshes:
+		check(w.box_instance(name).mesh == other_meshes[name], "the %s box was not rebuilt" % name)
+
+	# Transforms did not depend on the rebuild: the poses were not touched, and every transform is the published pose.
+	check(w.tire_instance("front").transform == front_tire_transform and w.box_instance("front_wheel").transform == front_box_transform, "front transforms unchanged by the dimension change")
+	check(w.tire_instance("rear").transform == rear_tire_transform and w.box_instance("rear_wheel").transform == rear_box_transform, "rear transforms unchanged")
+	check_vec3_near(w.box_instance("front_wheel").transform.origin, front_pose.origin, TOL, "the rebuilt box sits at the wheel position")
+	check_basis_near(w.box_instance("front_wheel").transform.basis, front_pose.basis, TOL, "and has the wheel orientation")
+
+	# And the other way round: a pose change moves the items without any rebuild.
+	var moved: Transform3D = Transform3D(Basis(Quaternion(Vector3(1, 0, 0), 1.0)), Vector3(0.5, 0.4, -0.9))
+	set_pose(assembly.front_wheel, moved.origin, moved.basis.get_rotation_quaternion())
+	var rebuilt_tire_mesh = w.tire_instance("front").mesh
+	var rebuilt_box_mesh = w.box_instance("front_wheel").mesh
+	w.update_wireframe(1.0)
+	check(w.tire_instance("front").mesh == rebuilt_tire_mesh and w.box_instance("front_wheel").mesh == rebuilt_box_mesh, "a pose change rebuilds no geometry")
+	check_vec3_near(w.box_instance("front_wheel").transform.origin, moved.origin, TOL, "the box follows the new position")
+	check_basis_near(w.tire_instance("front").transform.basis, moved.basis, TOL, "and the tyre the new orientation")
+	check(w.tire_instance("rear").transform == rear_tire_transform, "the rear wheel is not moved")
+	free_wireframe(w)
+
+
+## A body-spec size is the other kind of source dimension: changing one box rebuilds that box only; an invalid size skips it with a
+## diagnostic (never a crash) and a later valid size brings it back.
+func test_changing_a_body_size_at_runtime_rebuilds_only_that_box() -> void:
+	var assembly = make_assembly()
+	var w: GeometryWireframe = make_wireframe(assembly)
+	w.set_enabled(true)
+	w.update_wireframe(1.0)
+	var meshes: Dictionary = {}
+	for name in BODY_NAMES:
+		meshes[name] = w.box_instance(name).mesh
+	assembly.config.chassis.visual_size = Vector3(0.40, 0.60, 1.20)
+	w.update_wireframe(1.0)
+	check(w.box_instance("chassis").mesh != meshes["chassis"], "the chassis box was rebuilt")
+	var chassis_extent: Array = extents(mesh_vertices(w.box_instance("chassis")))
+	check_vec3_near(chassis_extent[1], Vector3(0.20, 0.30, 0.60), 1.0e-6, "chassis half extents 0.20 x 0.30 x 0.60")
+	check_signature(w.box_signature("chassis"), [0.20, 0.30, 0.60, 0.0, 0.0, 0.0], "chassis signature")
+	for name in BODY_NAMES:
+		if name != "chassis":
+			check(w.box_instance(name).mesh == meshes[name], "the %s box was not rebuilt" % name)
+	for k in 10:
+		w.update_wireframe(1.0)
+	var rebuilt = w.box_instance("chassis").mesh
+	w.update_wireframe(1.0)
+	check(w.box_instance("chassis").mesh == rebuilt, "no further rebuilds")
+
+	assembly.config.chassis.visual_size = Vector3(0.40, 0.0, 1.20)
+	w.update_wireframe(1.0)
+	check(w.box_instance("chassis") == null and w.box_count() == 5, "an invalid size skips only that box")
+	check(not w.diagnostics.is_empty(), "with a diagnostic")
+	check(w.box_signature("chassis") == [], "and no signature")
+	w.update_wireframe(1.0)  # must not raise or rebuild anything else
+	check(w.box_instance("steering").mesh == meshes["steering"], "other boxes unaffected")
+	assembly.config.chassis.visual_size = Vector3(0.30, 0.55, 1.00)
+	w.update_wireframe(1.0)
+	check(w.box_instance("chassis") != null and w.box_count() == 6, "a valid size brings the box back")
+	check_vec3_near(extents(mesh_vertices(w.box_instance("chassis")))[1], Vector3(0.15, 0.275, 0.5), 1.0e-6, "with the restored dimensions")
+	free_wireframe(w)
