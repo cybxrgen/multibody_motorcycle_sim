@@ -6,6 +6,7 @@ extends "res://Tests/sim_test_case.gd"
 
 const GeometryWireframe = preload("res://Simulation/Debug/geometry_wireframe.gd")
 const SimulationDebug = preload("res://Simulation/Debug/simulation_debug.gd")
+const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const CollisionBox = preload("res://Simulation/Motorcycle/motorcycle_collision_box.gd")
 const MotorcycleBuilder = preload("res://Simulation/Motorcycle/motorcycle_builder.gd")
 const MotorcyclePrototype = preload("res://Simulation/Motorcycle/motorcycle_prototype.gd")
@@ -119,13 +120,13 @@ func test_scene_keys_status_text_and_controls_keys() -> void:
 	scene.wireframe.log_diagnostics = false
 	scene._ready()  # the runner is inside SceneTree._initialize, where adding to the tree does not run _ready yet; calling it builds the scenario
 	scene._process(0.016)
-	check(not scene.wireframe.enabled and "[G] physical collision-box wireframe: off" in scene._label.text, "wireframe starts off and the label says so")
+	check(not scene.wireframe.enabled and "[G] collision-box + tyre wireframe: off" in scene._label.text, "wireframe starts off and the label says so")
 	check("[W/Up] throttle" in scene._label.text and "[S/Down] brake" in scene._label.text and "[A/Left] steer left" in scene._label.text and "[D/Right] steer right" in scene._label.text, "the help text lists the continuous controls")
 	check(not ("[T]" in scene._label.text) and not ("[B]" in scene._label.text), "the old external T / B torque toggles are gone from the help text")
 	scene._unhandled_input(key_event(KEY_G))
 	scene._process(0.016)
 	check(scene.wireframe.enabled and scene.wireframe.visible and "wireframe: ON" in scene._label.text, "G enables it")
-	check(scene.wireframe.box_count() == 4, "the scene's wireframe shows exactly the four physical boxes")
+	check(scene.wireframe.box_count() == 4 and scene.wireframe.tire_count() == 2, "the scene's wireframe shows the four physical boxes and both tyre surfaces")
 	var axes_before: bool = scene.debug_overlay.show_local_axes
 	scene._unhandled_input(key_event(KEY_L))
 	check(scene.debug_overlay.show_local_axes == (not axes_before) and scene.wireframe.enabled, "L still toggles the local axes only")
@@ -181,18 +182,14 @@ func test_keyboard_state_maps_to_normalized_inputs() -> void:
 
 # --- The boxes ARE the physical collision geometry ---
 
-func test_only_the_four_physical_boxes_no_wheels_no_tyre_surface() -> void:
+func test_only_the_four_physical_boxes_and_no_wheel_box() -> void:
 	var a = make_assembly()
 	var w = make_wireframe(a)
 	check(w.box_count() == 4, "four boxes")
 	for body_name in BOX_BODIES:
 		check(w.box_instance(body_name) != null, "%s has a box" % body_name)
 	check(w.box_instance("front_wheel") == null and w.box_instance("rear_wheel") == null, "no wheel box")
-	check(not w.has_method("tire_count") and not w.has_method("tire_instance"), "the tyre-surface layer no longer exists")
-	var children: int = 0
-	for child in w.get_children():
-		children += 1
-	check(children == 4, "exactly four drawn items (no tyre surface, no extra box)")
+	check(w.tire_count() == 0 and w.get_child_count() == 4, "without tyre geometry only the four boxes are drawn")
 	w.free()
 
 
@@ -344,3 +341,27 @@ func test_simulation_is_identical_with_the_visualization_on_and_off() -> void:
 	check(world_a.step_count == world_b.step_count and world_a.simulation_time == world_b.simulation_time, "step count and time are identical")
 	w.free()
 	w_c.free()
+
+
+func test_tyre_surfaces_are_drawn_from_the_tyre_geometry_and_follow_the_wheels() -> void:
+	var c = MotorcyclePrototype.config_with_collision()
+	c.front_tire_geometry = TireGeometry.new(0.12, 0.07)
+	c.rear_tire_geometry = TireGeometry.new(0.18, 0.10)
+	var a = make_assembly(c)
+	var w = make_wireframe(a)
+	w.set_enabled(true)
+	check(w.tire_count() == 2 and w.box_count() == 4 and w.get_child_count() == 6, "two tyre surfaces besides the four boxes")
+	for pair in [["front", a.front_wheel, 0.12, 0.31], ["rear", a.rear_wheel, 0.18, 0.32]]:
+		var vertices: PackedVector3Array = mesh_vertices(w.tire_instance(pair[0]))
+		var s_max: float = 0.0
+		var r_max: float = 0.0
+		for v in vertices:
+			s_max = maxf(s_max, absf(v.x))
+			r_max = maxf(r_max, Vector2(v.y, v.z).length())
+		check_near(s_max, 0.5 * pair[2], TOL, "%s surface spans the tyre width" % pair[0])
+		check_near(r_max, pair[3], TOL, "%s surface reaches the wheel radius" % pair[0])
+		check(w.tire_instance(pair[0]).get_parent() == w, "drawn by the wireframe")
+	set_pose(a.rear_wheel, Vector3(1.0, 0.5, 2.0), Quaternion.IDENTITY)
+	w.update_wireframe(1.0)
+	check_vec3_near(w.tire_instance("rear").transform.origin, Vector3(1.0, 0.5, 2.0), TOL, "the tyre follows its wheel")
+	w.free()

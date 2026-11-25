@@ -27,9 +27,10 @@ extends Node3D
 ## the normal load (last step's normal impulse / dt, read-only), the tyre slips, the longitudinal and lateral tyre force, the
 ## friction-ellipse utilisation and the rolling-resistance moment, and the number of active box-ground corner contacts per body.
 ## Keys: W/Up throttle, S/Down brake, A/Left steer left, D/Right steer right, Space pause/resume, N single step (paused), R reset,
-## L local axes, C COM markers, J anchors, G wireframe of the PHYSICAL collision boxes only (off by default; the same MotorcycleCollisionBox
-## objects that generate the box-ground contacts; no tyre surface, no wheel box), mouse drag orbit, wheel zoom.
+## L local axes, C COM markers, J anchors, G wireframe (off by default): the PHYSICAL collision boxes (the same MotorcycleCollisionBox objects that generate the
+## box-ground contacts) in white, plus the finite-width tyre surfaces (front green, rear violet; geometry only, no wheel box), mouse drag orbit, wheel zoom.
 
+const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
 const SimBodyState = preload("res://Simulation/Core/sim_body_state.gd")
 const MotorcycleBuilder = preload("res://Simulation/Motorcycle/motorcycle_builder.gd")
@@ -99,6 +100,8 @@ func _build_scenario() -> void:
 	_markers.clear()
 	world = SimWorld.new()  # default SimConfig: gravity (0, -9.81, 0)
 	var config = MotorcyclePrototype.config_with_collision()
+	config.front_tire_geometry = TireGeometry.new(0.12, 0.07)  # illustrative tread sections, drawn by the G wireframe (geometry only)
+	config.rear_tire_geometry = TireGeometry.new(0.18, 0.10)
 	assembly = MotorcycleBuilder.build(config, world)
 	if assembly == null:
 		push_error("motorcycle_test: the assembly could not be built.")
@@ -155,7 +158,7 @@ func _process(delta: float) -> void:
 	debug_overlay.update_overlay(alpha)
 	wireframe.update_wireframe(alpha)
 	_update_contact_markers(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] physical collision-box wireframe: %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching, orange = separated." % [
+	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] collision-box + tyre wireframe: %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching, orange = separated." % [
 		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(), _box_contact_report(),
 		"ON" if wireframe.enabled else "off", assembly.controls.throttle, assembly.controls.spec.max_drive_torque, assembly.controls.brake,
 		assembly.controls.spec.max_front_brake_torque, assembly.controls.spec.max_rear_brake_torque, assembly.controls.steering,

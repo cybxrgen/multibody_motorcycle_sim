@@ -18,7 +18,7 @@ M2.5.2 — Motorcycle collision geometry and basic controls: physical oriented-b
 - Generic solver, `SimWorld`, `ContactConstraint`, tyre model: not modified.
 
 ## 4. Verification (Godot 4.7.stable.official.5b4e0cb0f, Linux x86_64, headless)
-- VERIFIED: baseline 512 passed; final **548 passed, 0 failed, 0 skipped (11089 checks)**. Fresh import, `simulation_test`, `main`, `motorcycle_test` (240 frames) and a 3000-frame `--fixed-fps 60` run of `motorcycle_test`: 0 error or warning lines. `git diff --check` clean.
+- VERIFIED: baseline 512 passed; final **549 passed, 0 failed, 0 skipped (11097 checks)** (after the follow-up below). Fresh import, `simulation_test`, `main`, `motorcycle_test` (240 frames) and a 3000-frame `--fixed-fps 60` run of `motorcycle_test`: 0 error or warning lines. `git diff --check` clean.
 - UNVERIFIED: any graphical inspection (wireframe, falling, driving) — not performed; a real display or GPU; the keyboard path through a real window.
 
 ## 5. Unresolved / limitations
