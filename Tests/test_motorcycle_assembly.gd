@@ -252,9 +252,9 @@ func test_a5_primitive_inertias_match_their_documented_formulas() -> void:
 		return
 	# Box primitives (independent of SimMassProperties.box_inertia: m/12 (b^2 + c^2)).
 	var ch: Basis = a.chassis.local_inertia
-	check_near(ch.x.x, 120.0 / 12.0 * (0.55 * 0.55 + 1.0 * 1.0), 1.0e-4, "chassis I_xx of the 0.30 x 0.55 x 1.00 m box")
-	check_near(ch.y.y, 120.0 / 12.0 * (0.30 * 0.30 + 1.0 * 1.0), 1.0e-4, "chassis I_yy")
-	check_near(ch.z.z, 120.0 / 12.0 * (0.30 * 0.30 + 0.55 * 0.55), 1.0e-4, "chassis I_zz")
+	check_near(ch.x.x, MotorcyclePrototype.MASS_CHASSIS / 12.0 * (0.55 * 0.55 + 1.0 * 1.0), 1.0e-4, "chassis I_xx of the 0.30 x 0.55 x 1.00 m box")
+	check_near(ch.y.y, MotorcyclePrototype.MASS_CHASSIS / 12.0 * (0.30 * 0.30 + 1.0 * 1.0), 1.0e-4, "chassis I_yy")
+	check_near(ch.z.z, MotorcyclePrototype.MASS_CHASSIS / 12.0 * (0.30 * 0.30 + 0.55 * 0.55), 1.0e-4, "chassis I_zz")
 	# Fork frame: local +Y is the steering axis, so the moment about the steering axis is the box's I_yy (the sides perpendicular to it).
 	var steer_axis: Vector3 = a.config.steering_head.axis
 	check_near(steer_axis.dot(a.steering.inertia_world * steer_axis), 14.0 / 12.0 * (0.60 * 0.60 + 0.16 * 0.16), 1.0e-4, "steering assembly: moment about the steering axis = box I_yy (frame rotated by the rake)")

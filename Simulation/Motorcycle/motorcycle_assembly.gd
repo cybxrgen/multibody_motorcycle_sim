@@ -13,6 +13,7 @@ const FrontSuspension = preload("res://Simulation/Motorcycle/front_suspension.gd
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const TireGroundContact = preload("res://Simulation/Motorcycle/tire_ground_contact.gd")
+const BoxGroundContact = preload("res://Simulation/Motorcycle/box_ground_contact.gd")
 
 var world: SimWorld
 ## The configuration the assembly was built from (kept for geometry queries; not re-read by the simulation).
@@ -57,6 +58,14 @@ var rear_tire: TireGroundContact
 ## above do not use them yet.
 var front_tire_geometry
 var rear_tire_geometry
+
+## M2.5.2 physical collision boxes by body name ("chassis", "steering", "fork_slider", "swingarm"): independent copies of the configuration,
+## the SAME objects the box-ground contacts and the wireframe read. Empty when none is configured. A wheel never appears here.
+var collision_boxes: Dictionary = {}
+## M2.5.2 box-ground contacts by body name: eight BoxGroundContact (corner order 0..7) per box; empty without ground or boxes.
+var box_contacts: Dictionary = {}
+## M2.5.2 basic controls (a SimForceProvider registered in `world`); null when none is configured. Not part of force_providers().
+var controls
 
 
 ## The six bodies: chassis, steering, fork slider, swingarm, front wheel, rear wheel.
@@ -152,9 +161,58 @@ func remove_ground() -> void:
 		return
 	for contact in ground_contacts():
 		world.remove_constraint(contact)
+	for contact in all_box_contacts():
+		world.remove_constraint(contact)
+	box_contacts.clear()
 	world.remove_body(ground)
 	front_wheel_contact = null
 	rear_wheel_contact = null
 	front_tire = null
 	rear_tire = null
 	ground = null
+
+
+## The body that owns the collision box `body_name` ("chassis", "steering", "fork_slider", "swingarm"), or null.
+func box_body(body_name: String):
+	match body_name:
+		"chassis": return chassis
+		"steering": return steering
+		"fork_slider": return fork_slider
+		"swingarm": return swingarm
+	return null
+
+
+## Every box-ground contact in registration order (body order chassis, steering, fork slider, swingarm; corners 0..7).
+func all_box_contacts() -> Array:
+	var result: Array = []
+	for body_name in ["chassis", "steering", "fork_slider", "swingarm"]:
+		if box_contacts.has(body_name):
+			result.append_array(box_contacts[body_name])
+	return result
+
+
+## The box-ground contacts of one body that are currently ACTIVE (took part in the last prepared step).
+func active_box_contacts(body_name: String) -> Array:
+	var result: Array = []
+	for contact in box_contacts.get(body_name, []):
+		if contact.contact_active:
+			result.append(contact)
+	return result
+
+
+## Removes one collision box and its eight contacts (the body stays). Does nothing for an unknown name.
+func remove_collision_box(body_name: String) -> void:
+	for contact in box_contacts.get(body_name, []):
+		world.remove_constraint(contact)
+	box_contacts.erase(body_name)
+	collision_boxes.erase(body_name)
+
+
+## Removes the basic controls and releases the steering motor. Does nothing without controls.
+func remove_controls() -> void:
+	if controls == null:
+		return
+	controls.release_inputs()
+	controls.release_motor()
+	world.remove_force_provider(controls)
+	controls = null

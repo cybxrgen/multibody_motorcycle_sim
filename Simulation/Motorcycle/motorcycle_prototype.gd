@@ -40,6 +40,28 @@ const JointSpec = preload("res://Simulation/Motorcycle/motorcycle_joint_spec.gd"
 const GroundSpec = preload("res://Simulation/Motorcycle/motorcycle_ground_spec.gd")
 const TireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
+const CollisionBox = preload("res://Simulation/Motorcycle/motorcycle_collision_box.gd")
+const ControlSpec = preload("res://Simulation/Motorcycle/motorcycle_control_spec.gd")
+
+## ---- Estimated mass distribution (M2.5.2; ESTIMATES, not measured data, not a calibrated or real motorcycle) ----
+## Category assumed: a middleweight (about 600 cc class) standard / naked road motorcycle, WITHOUT rider, luggage and fuel but with oil and
+## coolant (about 185 kg). Each body carries only its own part and the rider is not included (rider mass belongs to a later increment):
+##   chassis      128 kg  frame, engine and gearbox, fluids, exhaust, radiator, tank shell, seat, bodywork, battery and electrics. The M2.1
+##                        value of 120 kg was raised by 8 kg because the engine, exhaust and fluids sit on this body and a 600 cc-class
+##                        engine alone is of the order of 55-65 kg.
+##   steering     14 kg   steering stem, triple clamps, handlebar with controls, headlight and instruments, upper fork tubes (unchanged)
+##   fork_slider   8 kg   lower fork legs, axle carrier, front brake calipers, front mudguard (unchanged; steering + slider stay the 22 kg fork)
+##   swingarm      9 kg   swingarm, rear brake caliper and carrier, chain guard, share of the linkage (unchanged)
+##   front_wheel  12 kg   rim, tyre, brake discs, hub (unchanged)
+##   rear_wheel   15 kg   rim, tyre, brake disc, rear sprocket and hub (unchanged)
+## Total 186 kg (the M2.1 illustrative total was 178 kg; the +8 kg is the chassis revision above and nothing else). All six masses are
+## independent specification fields: changing one never changes another (Tests/test_collision_mass.gd).
+const MASS_CHASSIS: float = 128.0
+const MASS_STEERING: float = 14.0
+const MASS_FORK_SLIDER: float = 8.0
+const MASS_SWINGARM: float = 9.0
+const MASS_FRONT_WHEEL: float = 12.0
+const MASS_REAR_WHEEL: float = 15.0
 
 ## Steering-axis rake from the vertical (degrees).
 const RAKE_DEGREES: float = 26.0
@@ -92,6 +114,33 @@ static func config_with_tires() -> MotorcycleConfig:
 	return c
 
 
+## ---- Physical collision boxes and basic controls (M2.5.2, illustrative, NOT measured) ----
+## Each structural box is centred on its body's COM frame with the SAME full dimensions that produce the body's inertia tensor
+## (SimMassProperties.box_inertia), so geometry, mass and inertia describe one solid box (uniform density approximation of the part).
+## Surface friction of every box against the ground: 0.6 (a hard plastic / metal part on asphalt, illustrative).
+const BOX_FRICTION: float = 0.6
+## Illustrative control limits: 150 N m drive torque on the rear axle, 250 / 150 N m front / rear brake torque, steering motor 1.0 rad/s
+## with a 40 N m cap, steering limit +-0.5 rad (about 29 degrees).
+const MAX_DRIVE_TORQUE: float = 150.0
+const MAX_FRONT_BRAKE_TORQUE: float = 250.0
+const MAX_REAR_BRAKE_TORQUE: float = 150.0
+const MAX_STEERING_RATE: float = 1.0
+const MAX_STEERING_TORQUE: float = 40.0
+const STEERING_LIMIT: float = 0.5
+
+
+## The tyre configuration (ground, tyres) plus the four physical collision boxes and the basic controls (M2.5.2). The collision boxes
+## take their dimensions from the body proxies that define the inertia boxes. A fresh configuration each call.
+static func config_with_collision() -> MotorcycleConfig:
+	var c: MotorcycleConfig = config_with_tires()
+	c.chassis_box = CollisionBox.new("chassis", c.chassis.visual_size, Vector3.ZERO, Quaternion.IDENTITY, BOX_FRICTION)
+	c.steering_box = CollisionBox.new("steering", c.steering.visual_size, Vector3.ZERO, Quaternion.IDENTITY, BOX_FRICTION)
+	c.fork_slider_box = CollisionBox.new("fork_slider", c.fork_slider.visual_size, Vector3.ZERO, Quaternion.IDENTITY, BOX_FRICTION)
+	c.swingarm_box = CollisionBox.new("swingarm", c.swingarm.visual_size, Vector3.ZERO, Quaternion.IDENTITY, BOX_FRICTION)
+	c.controls = ControlSpec.new(MAX_DRIVE_TORQUE, MAX_FRONT_BRAKE_TORQUE, MAX_REAR_BRAKE_TORQUE, MAX_STEERING_RATE, MAX_STEERING_TORQUE, STEERING_LIMIT)
+	return c
+
+
 ## A fresh, independent configuration each call (callers may mutate it). It has no ground (see config_with_ground()).
 static func config() -> MotorcycleConfig:
 	var c: MotorcycleConfig = MotorcycleConfig.new()
@@ -127,22 +176,22 @@ static func config() -> MotorcycleConfig:
 	c.rear_wheel_width = 0.18
 
 	# Bodies (name, mass kg, inertia about COM, COM position, orientation, box proxy size).
-	c.chassis = BodySpec.new("chassis", 120.0, SimMassProperties.box_inertia(120.0, Vector3(0.30, 0.55, 1.00)),
+	c.chassis = BodySpec.new("chassis", MASS_CHASSIS, SimMassProperties.box_inertia(MASS_CHASSIS, Vector3(0.30, 0.55, 1.00)),
 		Vector3(0.0, 0.62, 0.06), Quaternion.IDENTITY, Vector3(0.30, 0.55, 1.00))
 	# The fork frame is the world frame rotated about +X by the rake: local +Y = steering axis, local -Z = fork_forward.
-	c.steering = BodySpec.new("steering", 14.0, SimMassProperties.box_inertia(14.0, Vector3(0.60, 0.30, 0.16)),
+	c.steering = BodySpec.new("steering", MASS_STEERING, SimMassProperties.box_inertia(MASS_STEERING, Vector3(0.60, 0.30, 0.16)),
 		head_point - steer_axis * steering_com_below_head + fork_forward * steering_com_offset,
 		Quaternion(Vector3.RIGHT, rake), Vector3(0.60, 0.30, 0.16))
-	c.fork_slider = BodySpec.new("fork_slider", 8.0, SimMassProperties.box_inertia(8.0, Vector3(0.24, 0.40, 0.14)),
+	c.fork_slider = BodySpec.new("fork_slider", MASS_FORK_SLIDER, SimMassProperties.box_inertia(MASS_FORK_SLIDER, Vector3(0.24, 0.40, 0.14)),
 		head_point - steer_axis * slider_com_below_head + fork_forward * slider_com_offset,
 		Quaternion(Vector3.RIGHT, rake), Vector3(0.24, 0.40, 0.14))
-	c.swingarm = BodySpec.new("swingarm", 9.0, SimMassProperties.box_inertia(9.0, Vector3(0.20, 0.10, arm_length)),
+	c.swingarm = BodySpec.new("swingarm", MASS_SWINGARM, SimMassProperties.box_inertia(MASS_SWINGARM, Vector3(0.20, 0.10, arm_length)),
 		(pivot_point + rear_axle_point) * 0.5, Quaternion(Vector3.RIGHT, tilt), Vector3(0.20, 0.10, arm_length))
-	c.front_wheel = BodySpec.new("front_wheel", 12.0,
-		MotorcycleConfig.wheel_inertia(12.0, c.front_wheel_radius, WHEEL_INNER_FRACTION * c.front_wheel_radius, c.front_wheel_width),
+	c.front_wheel = BodySpec.new("front_wheel", MASS_FRONT_WHEEL,
+		MotorcycleConfig.wheel_inertia(MASS_FRONT_WHEEL, c.front_wheel_radius, WHEEL_INNER_FRACTION * c.front_wheel_radius, c.front_wheel_width),
 		front_axle_point, Quaternion.IDENTITY)
-	c.rear_wheel = BodySpec.new("rear_wheel", 15.0,
-		MotorcycleConfig.wheel_inertia(15.0, c.rear_wheel_radius, WHEEL_INNER_FRACTION * c.rear_wheel_radius, c.rear_wheel_width),
+	c.rear_wheel = BodySpec.new("rear_wheel", MASS_REAR_WHEEL,
+		MotorcycleConfig.wheel_inertia(MASS_REAR_WHEEL, c.rear_wheel_radius, WHEEL_INNER_FRACTION * c.rear_wheel_radius, c.rear_wheel_width),
 		rear_axle_point, Quaternion.IDENTITY)
 
 	# Hinges (world pivot, world axis at the reference pose). Each wheel COM is on its axle.

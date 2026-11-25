@@ -278,9 +278,12 @@ func test_g12_disabling_the_tyres_leaves_a_frictionless_rolling_machine_that_sti
 	var a = rig.assembly
 	set_rolling(rig, 5.0)
 	a.set_tire_forces_enabled(false)
-	for i in 240:
+	# 720 steps (6 s). The settled wheel load is m g of the motorcycle (measured 1824.65 N = 186 kg g, converged to 1e-5 from 480 steps on).
+	# The earlier version of this test compared a 240-step value (the suspension was still overshooting through the weight at that moment)
+	# with (m + 1 kg) g; the 1 kg fixture carriage is not carried by the wheels in the settled state. With the M2.5.2 chassis mass (128 kg) the
+	# 240-step transient is no longer close to the settled value, so the settled state is compared with the unchanged 0.3 % tolerance.
+	for i in 720:
 		rig.world.step()
 	check_near(-rig.carriage.linear_velocity.z, 5.0, 1.0e-3, "no tyre and no generic friction slows it")
-	# The fixture's 1 kg carriage hangs on the chassis slide, so the wheels carry (m + 1 kg) g.
-	check_near(a.front_tire.normal_load() + a.rear_tire.normal_load(), (a.total_mass() + 1.0) * G, 0.003 * a.total_mass() * G, "the unilateral normal contact still carries the weight")
+	check_near(a.front_tire.normal_load() + a.rear_tire.normal_load(), a.total_mass() * G, 0.003 * a.total_mass() * G, "the unilateral normal contact still carries the weight")
 	check_near(a.front_tire.longitudinal_force() + a.rear_tire.longitudinal_force() + a.front_tire.lateral_force() + a.rear_tire.lateral_force(), 0.0, 0.0, "all tangential forces are zero")

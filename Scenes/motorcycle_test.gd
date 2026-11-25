@@ -7,29 +7,28 @@ extends Node3D
 ## Tyre values are illustrative prototype parameters, NOT measured tyre data. Nothing is positioned by hand: the scene only advances the
 ## world with the fixed-step accumulator and renders PUBLISHED state; it never writes physical state.
 ##
-## PHYSICAL MODEL vs EXTERNAL TEST INPUT. The physical model is everything the world integrates by itself: bodies, joints, suspension,
-## normal contact and the tyre model. The only external inputs are the two toggles below, applied by a small TEST-ONLY force provider
-## (TestInput, defined in this script, registered in the world so it acts at every fixed step): an axle torque on the rear wheel
-## ([T], "drive") and an axle torque opposing the spin of both wheels ([B], "brake"). They are NOT an engine, clutch, gearbox, drivetrain,
-## brake system, rider or controller. Wheel torques only change the wheel spin; the tyres turn the resulting slip into force.
-## Cornering and combined braking + lateral slip need a lateral disturbance that a riderless motorcycle cannot hold, so they are exercised
-## in Tests/test_tire_forces.gd (single wheel) and Tests/test_motorcycle_tires.gd (assembly on a TEST-ONLY planar fixture), not here.
+## PHYSICAL MODEL vs USER INPUT (M2.5.2). The physical model is everything the world integrates by itself: bodies, joints, suspension, the
+## tyre contacts and the PHYSICAL COLLISION BOXES of the four structural bodies (chassis, steering assembly, fork slider, swingarm), which
+## touch the ground through eight corner contacts each (generic ContactConstraint); the wheels have none (the tyre contact is their only
+## ground contact). The only input is the basic direct control component (MotorcycleControls, a force provider evaluated at every fixed
+## step) that this scene feeds with normalized inputs read from the keyboard: W / Up throttle (axle torque on the rear wheel), S / Down
+## brake (opposing torque on both wheels), A / Left and D / Right steering (steering-hinge motor, limited torque and angle). Releasing a
+## key returns that input to zero (no torque; the steering motor then holds the steering rate at zero). It is NOT an engine, clutch,
+## gearbox, drivetrain, brake system, rider or controller: no PID, no balancing, no countersteering.
 ##
-## NOT a ride, NOT self-balancing, NOT a complete tyre model: a riderless motorcycle on two narrow point contacts is not stable in roll, and
-## there is no rider, drive, steering control, stand or stabilizer. The scene is exactly symmetric about its x = 0 plane, so under [T] and
-## [B] (both symmetric) it keeps standing/running straight in a knife-edge balance; that is NOT stability. A small disturbance topples it.
+## NOT a ride, NOT self-balancing, NOT a complete tyre model: a riderless motorcycle on two narrow point contacts is not stable in roll.
+## The scene starts exactly symmetric, so it stands in a knife-edge balance until a disturbance (steering input, numerical noise) topples it;
+## it then falls onto its structural boxes, which can touch the ground. That is expected behaviour, not a defect.
 ##
 ## Colors: chassis blue-grey, steering assembly orange, fork slider cyan, swingarm green, front wheel red, rear wheel yellow; wheels carry
 ## a contrasting spoke bar and valve marker so their rotation is visible; the dark slab is the ground plane. Contact markers (spheres at
 ## each wheel's lowest point, derived from the published pose): GREEN = touching (|gap| < 0.1 mm or penetrating), ORANGE = separated.
 ## Overlay: magenta/cyan crosses are the two anchors of each constraint (hinges and contacts). The label lists, per tyre, the signed gap,
-## the normal load (last step's normal impulse / dt, read-only), the tyre slips (from the published pose and velocities), the longitudinal
-## and lateral tyre force, the friction-ellipse utilisation and the rolling-resistance moment.
-## Keys: Space pause/resume, N single step (paused), R reset, T external drive torque on/off, B external brake torque on/off, L local axes,
-## C COM markers, J anchors, G geometry wireframe (off by default: oriented bounding boxes of the six bodies in white, plus the finite-width 3D
-## tyre surfaces, front green / rear violet, generated from the configured TireGeometry; presentation only), mouse drag orbit, wheel zoom.
-## The scene gives each tyre a TireGeometry (illustrative: front 0.12 m wide, crown radius 0.07 m; rear 0.18 m, 0.10 m) so that there is a
-## surface to draw. The assembly only stores it (the wheel contacts do not use it yet), so the simulation is identical with or without it.
+## the normal load (last step's normal impulse / dt, read-only), the tyre slips, the longitudinal and lateral tyre force, the
+## friction-ellipse utilisation and the rolling-resistance moment, and the number of active box-ground corner contacts per body.
+## Keys: W/Up throttle, S/Down brake, A/Left steer left, D/Right steer right, Space pause/resume, N single step (paused), R reset,
+## L local axes, C COM markers, J anchors, G wireframe of the PHYSICAL collision boxes only (off by default; the same MotorcycleCollisionBox
+## objects that generate the box-ground contacts; no tyre surface, no wheel box), mouse drag orbit, wheel zoom.
 
 const SimWorld = preload("res://Simulation/Core/sim_world.gd")
 const SimBodyState = preload("res://Simulation/Core/sim_body_state.gd")
@@ -38,35 +37,21 @@ const MotorcyclePrototype = preload("res://Simulation/Motorcycle/motorcycle_prot
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const SimulationRenderer = preload("res://Simulation/Presentation/simulation_renderer.gd")
 const SimulationDebug = preload("res://Simulation/Debug/simulation_debug.gd")
-const SimForceProvider = preload("res://Simulation/Core/sim_force_provider.gd")
 const TireModel = preload("res://Simulation/Motorcycle/tire_model.gd")
-const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const GeometryWireframe = preload("res://Simulation/Debug/geometry_wireframe.gd")
 
-## Illustrative magnitudes of the two external test inputs (N m).
-const DRIVE_TORQUE: float = 60.0
-const BRAKE_TORQUE: float = 40.0
+## Keyboard state -> normalized control inputs (throttle, brake, steering). Pure function of the pressed keys so it can be tested; physics code
+## never polls the keyboard. `is_down` is a Callable(int keycode) -> bool. Steering: +1 = steer LEFT (the positive steering-hinge angle).
+static func inputs_from_keys(is_down: Callable) -> Vector3:
+	var throttle: float = 1.0 if (is_down.call(KEY_W) or is_down.call(KEY_UP)) else 0.0
+	var brake: float = 1.0 if (is_down.call(KEY_S) or is_down.call(KEY_DOWN)) else 0.0
+	var steering: float = 0.0
+	if is_down.call(KEY_A) or is_down.call(KEY_LEFT):
+		steering += 1.0
+	if is_down.call(KEY_D) or is_down.call(KEY_RIGHT):
+		steering -= 1.0
+	return Vector3(throttle, brake, steering)
 
-
-## TEST-ONLY external input (not part of the motorcycle model): axle torques applied at every fixed step.
-class TestInput extends SimForceProvider:
-	var front_wheel
-	var rear_wheel
-	var drive: bool = false
-	var brake: bool = false
-
-	func involved_bodies() -> Array:
-		return [front_wheel, rear_wheel]
-
-	func apply_forces(_dt: float, _config) -> void:
-		var rear_axle: Vector3 = rear_wheel.orientation * Vector3.RIGHT
-		if drive:
-			rear_wheel.apply_torque(-rear_axle * DRIVE_TORQUE)  # positive drive: the wheel turns about -axle (forward rolling)
-		if brake:
-			for wheel in [front_wheel, rear_wheel]:
-				var axle: Vector3 = wheel.orientation * Vector3.RIGHT
-				var spin: float = -wheel.angular_velocity.dot(axle)
-				wheel.apply_torque(axle * BRAKE_TORQUE * clampf(spin / 0.5, -1.0, 1.0))  # opposes the spin
 
 var world: SimWorld
 var assembly = null
@@ -74,7 +59,6 @@ var renderer: SimulationRenderer = SimulationRenderer.new()
 var debug_overlay: SimulationDebug = SimulationDebug.new()
 var wireframe: GeometryWireframe = GeometryWireframe.new()
 var paused: bool = false
-var test_input: TestInput = TestInput.new()
 
 var _camera: Camera3D = Camera3D.new()
 var _yaw: float = 0.9
@@ -114,17 +98,11 @@ func _build_scenario() -> void:
 		marker.queue_free()
 	_markers.clear()
 	world = SimWorld.new()  # default SimConfig: gravity (0, -9.81, 0)
-	var config = MotorcyclePrototype.config_with_tires()
-	config.front_tire_geometry = TireGeometry.new(0.12, 0.07)  # illustrative tread sections (geometry only; the contacts do not use them yet)
-	config.rear_tire_geometry = TireGeometry.new(0.18, 0.10)
+	var config = MotorcyclePrototype.config_with_collision()
 	assembly = MotorcycleBuilder.build(config, world)
 	if assembly == null:
 		push_error("motorcycle_test: the assembly could not be built.")
 		return
-	test_input = TestInput.new()
-	test_input.front_wheel = assembly.front_wheel
-	test_input.rear_wheel = assembly.rear_wheel
-	world.add_force_provider(test_input)
 	renderer.world = world
 	debug_overlay.world = world
 	wireframe.setup(assembly)
@@ -170,15 +148,39 @@ func _process(delta: float) -> void:
 	if world == null or assembly == null:
 		return
 	if not paused:
+		_apply_keyboard()
 		world.advance(delta)
 	var alpha: float = world.interpolation_alpha() if not paused else 1.0
 	renderer.render(alpha)
 	debug_overlay.update_overlay(alpha)
 	wireframe.update_wireframe(alpha)
 	_update_contact_markers(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n%s\n[Space] pause  [N] step  [R] reset  [T] external drive torque  [B] external brake torque  [L] local axes  [C] COM  [J] anchors  [G] geometry wireframe: %s\nEXTERNAL TEST INPUT (not a drivetrain or rider): drive %s (%.0f N m on the rear axle), brake %s (%.0f N m against both spins).\nPhysical model: gravity, free hinges, suspension, normal contact, simple illustrative tyres (not measured data). Not a ride, not self-balancing, not a complete tyre model (no roll stability: running only because the scene is exactly symmetric).\nGreen marker = touching, orange = separated." % [
-		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(),
-		"ON" if wireframe.enabled else "off", "ON" if test_input.drive else "off", DRIVE_TORQUE, "ON" if test_input.brake else "off", BRAKE_TORQUE]
+	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] physical collision-box wireframe: %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching, orange = separated." % [
+		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(), _box_contact_report(),
+		"ON" if wireframe.enabled else "off", assembly.controls.throttle, assembly.controls.spec.max_drive_torque, assembly.controls.brake,
+		assembly.controls.spec.max_front_brake_torque, assembly.controls.spec.max_rear_brake_torque, assembly.controls.steering,
+		assembly.controls.spec.max_steering_rate, assembly.controls.spec.max_steering_torque, assembly.controls.spec.steering_limit]
+
+
+## Translates the keyboard into the control inputs (zero when nothing is pressed). Called once per frame; the control component reads the
+## latest inputs at every fixed step.
+func _apply_keyboard() -> void:
+	if assembly == null or assembly.controls == null:
+		return
+	var inputs: Vector3 = inputs_from_keys(func(keycode: int) -> bool: return Input.is_key_pressed(keycode))
+	assembly.controls.set_inputs(inputs.x, inputs.y, inputs.z)
+
+
+## Number of active box-ground corner contacts per structural body, for the label.
+func _box_contact_report() -> String:
+	var text: String = "box-ground corner contacts (active / touching):"
+	for body_name in ["chassis", "steering", "fork_slider", "swingarm"]:
+		var touching: int = 0
+		for contact in assembly.box_contacts.get(body_name, []):
+			if contact.contact_active and contact.is_touching():
+				touching += 1
+		text += "  %s %d / %d" % [body_name, assembly.active_box_contacts(body_name).size(), touching]
+	return text
 
 
 ## Pose of a body for rendering (interpolated PUBLISHED state; read-only).
@@ -266,10 +268,6 @@ func _unhandled_input(event: InputEvent) -> void:
 					world.step()
 			KEY_R:
 				_build_scenario()
-			KEY_T:
-				test_input.drive = not test_input.drive
-			KEY_B:
-				test_input.brake = not test_input.brake
 			KEY_L:
 				debug_overlay.show_local_axes = not debug_overlay.show_local_axes
 			KEY_C:
