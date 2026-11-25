@@ -225,6 +225,14 @@ Position error (constraint drift, contact penetration, a violated hinge limit) i
   - *Cold-started convergence.* Split impulses are not warm started, so high mass-ratio configurations need more iterations for the same correction accuracy than the warm-started physical rows (tracked in `PROJECT_STATE.md`).
 - **Purpose and limits.** Distinguish: **numerical error** (integration order), **constraint drift** (anchor/axis separation, bounded by the split correction), **physical motion** (swing). beta is the fraction of error removed per step, range `[0, 1]` (beta > 1 would over-correct); there is no hidden damping. First-order drift remains: the steady-state anchor error scales with `v^2 dt^2/(2 L beta)`.
 
+## Tyre surface sampling (M2.5.3 Stage A)
+- **Parameterisation.** Axle `u = q X`, radial frame `b1 = q Y`, `b2 = q Z`, radial direction `e(theta) = cos(theta) b1 + sin(theta) b2`. Each meridian is the circular crown of radius `rho` with centre at radial distance `R - rho`; with the meridian angle `phi`, `s = rho sin(phi)` and `r = R - rho + rho cos(phi)` (identical to `TireGeometry.profile_radius`). Surface point `x(phi, theta) = p + u s + e r`.
+- **Normal.** Outward unit normal `n = cos(phi) e + sin(phi) u` (equal to `(sqrt(rho^2 - s^2) e + s u) / rho`); finite at the shoulders, including the semicircular limit `rho = w/2`.
+- **Area element.** `dA = rho r dphi dtheta` exactly (`|x_phi x x_theta| = rho r`).
+- **Quadrature.** Trapezoid in `phi` over `[-asin(w/2rho), asin(w/2rho)]` with half weights at the two shoulder nodes (both shoulders are included); uniform periodic rule in `theta = 2 pi j / N` (spectral for the periodic integrand). Sample weight `rho r(phi_i) dphi_i dtheta` in m^2. Sum of weights → exact tread area `2 pi rho (2 (R - rho) asin(w/2rho) + w)` as the grid is refined; the trapezoid error is second order in the lateral spacing.
+- **Gap.** `gap = n_plane . (x - p0)` (positive above the plane). Not a force; the normal response is Stage B.
+- **Rolling.** Spinning by `alpha` about the axle maps the circumferential index: `theta` of the spun sample is the unspun angle `theta + alpha` (rotation about +X takes the radial Y toward Z).
+
 ## Time
 - Fixed timestep default 1/120 s, independent of render rate. Accumulator with frame-time clamp and step cap to avoid a spiral of death.
 - Rendering interpolates between the previous and the published state: `alpha = accumulator / dt`.

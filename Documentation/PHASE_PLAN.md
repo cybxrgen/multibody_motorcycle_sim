@@ -28,8 +28,7 @@ M2.1 (rigid assembly) is complete and accepted (PR #10); M2.2 (front telescopic 
 | M2.5.1 Finite-width tire geometry (motorcycle-specific tyre cross-section, lowest point against a plane with camber, per-wheel configuration; geometry only), with M2.5.1.1 validation hardening | Implemented, accepted and merged (PR #17) |
 | M2.5.1.2 Toggleable geometry wireframe (presentation only: oriented body boxes and finite-width tyre surfaces, key G), with M2.5.1.2.1 runtime box-dimension refresh | Implemented, accepted and merged (PR #18); explicitly authorized increment, not a physics milestone; its tyre-surface and visual-size box views were replaced in M2.5.2 |
 | M2.5.2 Motorcycle collision geometry and basic controls (oriented-box ground contacts for chassis, steering assembly, fork slider and swingarm through the generic contact; wheels keep tyre contact only; estimated per-part masses; direct throttle / brake / steering inputs replacing the test torque toggles; wireframe of the physical boxes) | Implemented and verified, awaiting user review |
-| Discrete contact-patch approximation (listed earlier as M2.5.2; numbering to be set by the user) | Not started — not authorized |
-| Tire-force integration (listed earlier as M2.5.3) | Not started — not authorized |
+| M2.5.3 Distributed finite-width tire contact patch (per-wheel patch constraint with compliant sample normal support, aggregate contact state for the existing tyre model, front/rear independence, debug view) | Stage A (deterministic tyre surface sampling, geometry only) implemented and verified locally, awaiting user review; Stages B–E not started |
 | Further tire/rolling interaction (listed earlier as M2.5.4; scope to be defined by the user) | Not started — not authorized |
 | M2.6 Powertrain interaction (engine, clutch, gearbox, final drive) | Not started — not authorized |
 | Integrated M2 validation | Not started — not authorized |
