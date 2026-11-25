@@ -131,9 +131,10 @@ static func sample(wheel_position: Vector3, wheel_orientation: Quaternion, geome
 			var point: Vector3 = wheel_position + u * s + e * r
 			var normal: Vector3 = surface_normal(wheel_orientation, geometry, s, theta)
 			var weight: float = weight_lateral * dtheta
-			if not (point.is_finite() and normal.is_finite() and is_finite(weight)):
-				return _fail("non-finite sample geometry (the pose or tyre data is too large for a finite result)")
+			# The gap is a subtraction of two finite points and can overflow even when both are finite: check it before append.
 			var gap: float = plane_unit_normal.dot(point - plane_point)
+			if not (point.is_finite() and normal.is_finite() and is_finite(weight) and is_finite(gap)):
+				return _fail("non-finite sample geometry or signed gap (the pose, plane or tyre data is too large for a finite result)")
 			samples.append({"lateral_index": i, "angular_index": j, "lateral_offset": s, "angle": theta, "position": point,
 				"normal": normal, "radius": r, "weight": weight, "gap": gap})
 			total_area += weight

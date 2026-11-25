@@ -178,8 +178,17 @@ func test_f_camber_lowest_sample_matches_the_reference_lowest_point() -> void:
 		if smp["gap"] < best_gap:
 			best_gap = smp["gap"]
 			best = smp
-	# A grid cannot be below the true minimum. The grid error is at most the height change over half the angular step
-	# (r (1 - cos 0.7 deg) ~ 2.3e-5 m) plus the curvature term over half the lateral spacing (~1.8e-3 m); 1e-4 m bounds both.
+	# A grid cannot be below the true minimum (the sampled gap is an upper bound on the minimum gap). Two HEIGHT errors arise,
+	# and they are not the same kind of quantity:
+	#  - Angular discretisation (height): the nearest meridian is at most half a step (0.7 deg) from the optimal e, and moving
+	#    e by delta raises the height by r (1 - cos delta). Here r = 0.31 m: 0.31 (1 - cos 0.01222) = 2.3e-5 m.
+	#  - Lateral discretisation (height, curvature term): the nearest node lies at most half the spacing from the optimal s*.
+	#    Spacing = rho * 2 asin(w/2rho) / 63 = 3.6e-3 m, so the half-spacing is 1.8e-3 m. h(s) = h_c + a s - L r(s) gives
+	#    h'' = L rho^2 / (rho^2 - s^2)^(3/2), about L / rho = 9.7 1/m near s = 0 (L = sqrt(1 - a^2) with a = sin 0.25 = 0.247).
+	#    The height error is then at most 0.5 * 9.7 * (1.8e-3)^2 = 1.5e-5 m.
+	#  The two height errors sum to at most about 3.8e-5 m, so the 1e-4 m tolerance on the gap holds with margin.
+	# The lateral POSITION of the lowest sample is a different quantity (metres along the axle, not height). Its check below
+	# uses the full lateral spacing (3.6e-3 m), a looser bound than the half spacing that the nearest-node argument needs.
 	check(best_gap >= oracle["gap"] - 1.0e-6, "grid minimum below the true minimum (%s < %s)" % [best_gap, oracle["gap"]])
 	check_near(best_gap, oracle["gap"], 1.0e-4, "lowest sampled gap disagrees with TireGeometry.lowest_point")
 	check_near(best["lateral_offset"], oracle["lateral_offset"], 2.0 * asin(0.5 * W / RHO) * RHO / 63.0 + 1.0e-6,
@@ -290,3 +299,16 @@ func test_k_bit_identical_repeats_and_consistent_total_area() -> void:
 	check(identical, "two identical calls produced different samples")
 	check_near(total, a["total_area"], 1.0e-9, "total_area is not the sum of the weights")
 	check(a["lateral_count"] == 17 and a["circumferential_count"] == 48, "grid sizes not reported")
+
+
+# ---- L: a signed gap that overflows is rejected before any sample is kept ----
+
+func test_l_overflowing_gap_is_rejected_with_no_samples() -> void:
+	# Every input is finite: the wheel centre at +3e38 m and the plane point at -3e38 m (float32 max is about 3.4e38).
+	# The sample positions are finite (~3e38 m), but point - plane_point is about 6e38 m and overflows to +inf.
+	var big: float = 3.0e38
+	var res: Dictionary = TirePatchSampler.sample(Vector3(big, 0.0, 0.0), Quaternion.IDENTITY, geo(), R,
+			Vector3(-big, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), 9, 24)
+	check(not res["valid"], "overflowing signed gap accepted as a valid sample set")
+	check(res["samples"].is_empty(), "overflowing signed gap left %d samples in the result" % res["samples"].size())
+	check(not String(res["reason"]).is_empty(), "overflowing signed gap rejected without a reason")
