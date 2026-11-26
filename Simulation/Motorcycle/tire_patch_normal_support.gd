@@ -28,19 +28,34 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## k_A, c_A, A_i and dt. Unconditionally stable for any positive k_i, c_i (implicit). The implicit look-ahead adds a numerical damping dt k_i, so the
 ## effective damping per sample is c_i + dt k_i (c_A + dt k_A per unit area): for k_A = 4e6 N/m^3 and dt = 1/120 s that is 3.3e4 N s/m^3.
 ##
-## ---- Spin about the axle is excluded from the normal rows (rolling resistance is NOT hidden in the normal support) ----
-## The tread is a surface of revolution about the axle u: a spin about u maps the surface onto itself, so it cannot change where the surface
-## meets the plane, and the sample velocity it induces is TANGENT to the surface. Letting that velocity enter vn_i would make every
-## tread sample at the front of the footprint "approach" the ground and every sample at the rear "recede" at omega * z_i, so the damper and
-## the implicit look-ahead (dt k vn') would load the front of the footprint more than the rear: a hysteretic moment about the axle, i.e. a
-## rolling-resistance-like moment of 13 % to 20 % of N R in a probe at 30 to 60 rad/s (c_A = 0 to 1e5), tied to dt, and +28 % to +416 % load. That belongs to
-## the tyre model (Stage C), not to the normal support. Each sample row therefore uses the angular Jacobian with its axle component
-## removed:  J_w = (r x n) - u (u . (r x n)),  so Cdot = n . v_c + (omega - (omega . u) u) . (r x n)  (the spin does not enter) and the
-## row exerts no moment about u. The single-point contact has the same property (its contact point is directly below the hub). For the
-## quasi-static footprint the removed part sums to zero anyway: the footprint is symmetric about the plane through u and the in-plane
-## direction of n, so the force line meets the axle. `applied_wheel_moment()` is what the wheel receives; `total_moment_world()` is the
-## geometric moment of the same forces (equal for the footprint, up to that axle component).
-##
+## ---- Sample-point moment (the row Jacobian is the full wrench of a normal impulse at the sample) ----
+## ConstraintRow applies an impulse lambda as dv_B = M^-1 J_lin lambda and domega_B = I_w^-1 J_ang lambda, and the same J gives
+## Cdot = J . v. A normal impulse lambda_i n acting at the sample position x_i on the wheel (centre p, r_i = x_i - p) is the wrench
+## (force n lambda_i, moment r_i x n lambda_i about p), so the wheel-side row is exactly  J_lin = n,  J_ang = r_i x n,  with no component
+## removed: the angular impulse the solver applies is the moment of the normal impulse at its actual sample position, and
+## `total_moment_world(wheel.position)` and `applied_wheel_moment()` are the same sum  sum_i (r_i x n) F_i  (applied_wheel_moment reads the
+## installed rows' angular Jacobians, total_moment_world the sample positions; they agree to rounding). The axle component
+## (r_i x n) . u of a sample moment is real: it is the fore-aft offset of the sample's line of action from the wheel centre times the load
+## (zero for the quasi-static footprint, which is symmetric fore-aft, and non-zero whenever the loads are fore-aft asymmetric).
+## ---- Spin about the axle is removed from the compression RATE, not from the wrench ----
+## The single row Jacobian is both the velocity map (Cdot = J . v) and the wrench map, so with the full J_ang = r_i x n the sample velocity
+## entering vn_i is the rigid-body point velocity n . (v + omega x r_i), which contains the spin term (omega . u)(u . (r_i x n)). The tread is a
+## surface of revolution about the axle u: a spin maps the surface onto itself, so that term is the TANGENT material velocity of the tread, not
+## a rate of compression. Left in, it makes the damper and the implicit look-ahead (dt k vn') load the leading samples of the footprint more
+## than the trailing ones: probe (full Jacobian, no compensation, 17x96 samples, 2 cm compression, rolling at 30 and 60 rad/s): load +27 % and
+## +76 % with c_A = 0, +185 % and +412 % with c_A = 1e5, and a moment about the axle of 13 % to 20 % of N R (a hidden rolling resistance).
+## A first version of Stage B removed the axle component from J_ang; that also removed it from the wrench, so the solver moment disagreed with
+## the geometric moment of the loads (rejected). Here the wrench keeps the full J_ang and the rate is corrected in the row BIAS, a separate,
+## documented velocity-level term (the bias is a free scalar of the row, so the wrench is untouched):
+##   spin_bias_i = -(omega_B . u)(u . (r_i x n)),   omega_B and u taken at prepare (start of step);   bias_i += spin_bias_i.
+## At the start of the step Cdot_i + spin_bias_i = n . v_c + (omega - (omega . u) u) . (r_i x n): the spin does not enter vn_i, exactly as for
+## the surface of revolution. The term is frozen over the step like the Jacobian (the frozen-Jacobian limitation of the project); a change of
+## the axle spin DURING the step (by the patch's own axle moment or by another constraint) is still seen by the row through J_ang. For
+## bottomed (rigid) rows it is the only bias, so a spinning bottomed tyre is not pushed by tangential tread velocity either. Real axle moments
+## stay real: for the quasi-static footprint the loads are fore-aft symmetric and the moment about the axle is zero; any fore-aft asymmetric
+## load acts with its true moment. No tangential row exists here: the in-plane and spin responses of the tyre are not modelled by this
+## constraint (Stage C).
+
 ## ---- Excessive penetration (bottoming) ----
 ## A sample compressed by more than `max_compression` (m) at the start of the step is BOTTOMED: its row becomes the rigid non-penetration
 ## row of the generic contact (gamma = 0, bias = 0, vn' >= 0, bound [0, +INF)) with a split-impulse positional correction toward the
@@ -62,6 +77,11 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## non-finite, ALL rows and carried impulses are discarded and the load is zero: nothing stale survives into a later contact, whose
 ## first step starts cold (identical to a freshly created patch). SimWorld's abort calls reset_warm_start(), which clears everything.
 ## Non-finite carried impulses are discarded before they are applied.
+## A physically compressed sample whose DERIVED coefficients (gamma, bias, split bias) are not finite makes the whole patch INVALID for that step
+## (e.g. an extremely small stiffness density with zero damping overflows gamma = 1/(dt (c + dt k)) although every input is finite and
+## accepted by validate(): the bound depends on the sample area and the time step, which validate() cannot know). The patch is then cleared
+## exactly like complete separation (no row, no load, no carried impulse, contact_active = false) and `last_reason` names the coefficient and
+## the sample; the wheel receives nothing from the patch. A sample is never skipped as if it were uncompressed.
 
 const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const TirePatchSampler = preload("res://Simulation/Motorcycle/tire_patch_sampler.gd")
@@ -92,7 +112,8 @@ var circumferential_count: int = 0
 
 ## True when the last prepared step had at least one physically compressed sample.
 var contact_active: bool = false
-## Why the last step produced no support ("" when it had some): the sampling failure reason or "no compressed sample".
+## Why the last step produced no support ("" when it had some): the sampling failure reason, "invalid time step", "no compressed sample" or
+## "invalid derived coefficient ..." naming the coefficient and the sample.
 var last_reason: String = ""
 
 var _dt: float = 0.0
@@ -104,8 +125,6 @@ var _active_position: Array = []
 var _active_gap: Array = []
 var _active_area: Array = []
 var _active_bottomed: Array = []
-## Angular Jacobian of each active row on the wheel (axle component removed), for applied_wheel_moment().
-var _active_moment_arm: Array = []
 ## Physical load (N) of each active sample and the aggregate, from the last solved step.
 var _sample_load: Array = []
 var _load: float = 0.0
@@ -245,12 +264,13 @@ func total_moment_world(about: Vector3) -> Vector3:
 	return moment
 
 
-## Moment the patch applies to the wheel about its centre (N m, world): sum over the active samples of the axle-free arm
-## (r x n) - u (u . (r x n)) times the sample load. Its component along the axle is zero by construction (see the header).
+## Moment the patch applies to the wheel about its centre (N m, world): sum over the active rows of the installed wheel-side angular
+## Jacobian times the sample load, i.e. what the solver's angular impulse delivers (domega = I_w^-1 sum_i J_ang_i lambda_i). It equals
+## total_moment_world(wheel.position) up to rounding because J_ang_i = r_i x n.
 func applied_wheel_moment() -> Vector3:
 	var moment: Vector3 = Vector3.ZERO
-	for k in _active_moment_arm.size():
-		moment += _active_moment_arm[k] * _sample_load[k]
+	for k in mini(rows.size(), _sample_load.size()):
+		moment += rows[k].angular_b * _sample_load[k]
 	return moment
 
 
@@ -306,6 +326,7 @@ func _update_rows(dt: float, config) -> void:
 		return
 	var n: Vector3 = plane_normal
 	var axle: Vector3 = (body_b.orientation * AXLE_LOCAL).normalized()
+	var spin: float = body_b.angular_velocity.dot(axle)  # start-of-step spin about the axle (frozen over the step)
 	var kept: Dictionary = {}
 	var new_rows: Array = []
 	_active_index = []
@@ -313,7 +334,6 @@ func _update_rows(dt: float, config) -> void:
 	_active_gap = []
 	_active_area = []
 	_active_bottomed = []
-	_active_moment_arm = []
 	for s in result["samples"]:
 		var gap: float = s["gap"]
 		if not (gap < 0.0):
@@ -326,9 +346,16 @@ func _update_rows(dt: float, config) -> void:
 		var gamma: float = coefficients["gamma"]
 		var bias: float = coefficients["bias_per_gap"] * gap
 		var bottomed: bool = -gap > max_compression
+		var spin_bias: float = -spin * axle.dot((position - body_b.position).cross(n))  # tangent tread velocity, not compression rate (see the header)
 		var split_bias: float = (config.baumgarte_factor / dt) * (gap + max_compression)
-		if not (is_finite(gamma) and is_finite(bias) and is_finite(split_bias)):
-			continue  # degenerate sample: skipped like an uncompressed one, its carried state is dropped
+		# A compressed sample with a non-finite derived coefficient is an invalid patch, never an inactive sample.
+		var bad: String = "gamma" if not is_finite(gamma) else ("bias" if not is_finite(bias) else ("split bias" if not is_finite(split_bias) else ("spin bias" if not is_finite(spin_bias) else "")))
+		if bad != "":
+			last_reason = "invalid derived coefficient: %s is not finite for compressed sample %d (lateral %d, angular %d; area %s m^2, stiffness %s N/m, damping %s N s/m, dt %s s)" % [
+					bad, int(s["lateral_index"]) * circumferential_count + int(s["angular_index"]), int(s["lateral_index"]), int(s["angular_index"]),
+					area, stiffness, damping, dt]
+			_clear_state()
+			return
 		var index: int = int(s["lateral_index"]) * circumferential_count + int(s["angular_index"])
 		var row = _rows_by_index.get(index)
 		if row == null:
@@ -337,24 +364,22 @@ func _update_rows(dt: float, config) -> void:
 			row.reset_impulses()
 		var r_a: Vector3 = position - body_a.position
 		var r_b: Vector3 = position - body_b.position
-		var arm: Vector3 = r_b.cross(n)
-		arm -= axle * axle.dot(arm)  # spin about the axle neither enters vn nor produces a moment (see the header)
 		row.linear_a = -n
 		row.angular_a = -r_a.cross(n)  # the ground is static: it takes no velocity change, the term only keeps the row symmetric
 		row.linear_b = n
-		row.angular_b = arm
+		row.angular_b = r_b.cross(n)  # full moment of a normal impulse at the sample (see the header)
 		row.min_impulse = 0.0
 		row.max_impulse = INF
 		if bottomed:
 			row.softness = 0.0
-			row.bias = 0.0
+			row.bias = spin_bias
 			row.split_enabled = true
 			row.split_bias = split_bias
 			row.split_min_impulse = 0.0
 			row.split_max_impulse = INF
 		else:
 			row.softness = gamma
-			row.bias = bias
+			row.bias = bias + spin_bias
 			row.split_enabled = false
 		kept[index] = row
 		new_rows.append(row)
@@ -363,7 +388,6 @@ func _update_rows(dt: float, config) -> void:
 		_active_gap.append(gap)
 		_active_area.append(area)
 		_active_bottomed.append(bottomed)
-		_active_moment_arm.append(arm)
 	if new_rows.is_empty():
 		last_reason = "no compressed sample"
 		_clear_state()
@@ -417,6 +441,5 @@ func _clear_state() -> void:
 	_active_gap = []
 	_active_area = []
 	_active_bottomed = []
-	_active_moment_arm = []
 	_sample_load = []
 	_load = 0.0

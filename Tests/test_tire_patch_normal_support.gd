@@ -382,9 +382,9 @@ func test_e_normal_response_acts_along_the_plane_normal_at_the_sample_positions(
 		var smp: Dictionary = by_index[entry["index"]]
 		check_vec3_near(row.linear_b, n, 1.0e-6, "the wheel-side row direction is not the ground normal")
 		check_vec3_near(row.linear_a, -n, 1.0e-6, "the ground-side row direction is not minus the ground normal")
-		# The lever arm is the ACTUAL sample position relative to the wheel centre (independent Stage A position), with the axle component removed.
+		# The lever arm is the ACTUAL sample position relative to the wheel centre (independent Stage A position): the full moment of a normal
+		# impulse there, with nothing removed (the axle component is part of the wrench; the spin is handled in the row bias, see test_e_spin).
 		var arm: Vector3 = (smp["position"] - pos0).cross(n)
-		arm -= u * u.dot(arm)
 		check_vec3_near(row.angular_b, arm, 1.0e-6, "the row does not act at the sample position")
 		check_vec3_near(row.angular_a, -(smp["position"] - ground.position).cross(n), 1.0e-6, "the ground-side lever arm is not the sample position")
 		check_near(row.min_impulse, 0.0, 0.0, "the sample row must be unilateral (lower bound 0)")
@@ -394,26 +394,117 @@ func test_e_normal_response_acts_along_the_plane_normal_at_the_sample_positions(
 	check(dv.dot(n) > 0.0, "the support must push the wheel away from the plane")
 	check_near(dv.dot(tangent), 0.0, 1.0e-9, "no tangential velocity change (the patch has no friction)")
 	check_near(dv.cross(n).length(), 0.0, 1.0e-6 * dv.length(), "the velocity change is not along the ground normal")
-	check_near((wheel.angular_velocity - w0).dot(u), 0.0, 1.0e-9, "no change of the spin (no moment about the axle)")
+	# The quasi-static footprint is fore-aft symmetric, so the true moment about the axle vanishes up to rounding of the sample loads.
+	# Scale-aware bound: the axle angular impulse is rounding of the float32 sample arithmetic on the inclined plane (measured 5e-7 of N R dt
+	# for this 100 kg wheel at 40 rad/s; bound 2e-6), not a physical axle moment: a real fore-aft asymmetry would be orders larger (>0.1 N R).
+	var axle_impulse: float = (wheel.inverse_inertia_world.inverse() * (wheel.angular_velocity - w0)).dot(u)
+	check_near(axle_impulse, 0.0, 2.0e-6 * s.normal_load() * R * DT, "no change of the spin (the symmetric footprint has no moment about the axle)")
 	check_vec3_near(ground.linear_velocity, Vector3.ZERO, 0.0, "the static ground must take no velocity")
 	check_vec3_near(ground.angular_velocity, Vector3.ZERO, 0.0, "the static ground must take no angular velocity")
 
 
 func test_e_spin_does_not_change_the_normal_support() -> void:
-	# The tread is a surface of revolution: a spin about the axle must neither load the front of the footprint more than the rear (a
-	# hidden rolling resistance, 13 % to 19 % of N R in the probe that motivated the projection) nor change the load.
+	# The tread is a surface of revolution: a spin about the axle must neither load the front of the footprint more than the rear nor change
+	# the load. The wrench keeps the full angular Jacobian; the tangent tread velocity is removed from the compression rate in the row BIAS
+	# (header of the constraint). Without that term the load grows +27 % / +76 % (c_A = 0) and +185 % / +412 % (c_A = 1e5) at 30 / 60 rad/s
+	# and the moment about the axle is 13 % to 20 % of N R. Tolerances: the load is bit-for-bit independent of the spin up to float32
+	# rounding of the sample arithmetic (1e-9 relative); the true axle moment of the symmetric footprint vanishes up to that rounding
+	# (measured up to 1e-8 N R; bound 1e-7 N R; it was exactly 0 only while the axle component was cut out of the wrench).
 	var base: Dictionary = {}
-	for spin in [0.0, 30.0, 60.0]:
-		var rig: Dictionary = heavy_rig(17, 96, 0.0, DELTA, {"angular_velocity": Vector3(-spin, 0.0, 0.0), "velocity": Vector3(0.0, 0.0, -spin * R)})
-		rig["world"].step()
+	for c in [0.0, C_A]:
+		for spin in [0.0, 30.0, 60.0]:
+			var rig: Dictionary = heavy_rig(17, 96, 0.0, DELTA, {"c": c, "angular_velocity": Vector3(-spin, 0.0, 0.0), "velocity": Vector3(0.0, 0.0, -spin * R)})
+			var p0: Vector3 = rig["wheel"].position
+			rig["world"].step()
+			var s = rig["support"]
+			var label: String = "c %s, spin %s rad/s" % [c, spin]
+			if spin == 0.0:
+				base = {"load": s.normal_load(), "count": s.active_sample_count()}
+			else:
+				check_near(s.normal_load(), base["load"], 1.0e-9 * base["load"], "%s: the spin changed the normal load" % label)
+				check(s.active_sample_count() == base["count"], "%s: the spin changed the footprint" % label)
+			check_near(s.applied_wheel_moment().dot(Vector3.RIGHT), 0.0, 1.0e-7 * s.normal_load() * R, "%s: axle moment of the symmetric footprint" % label)
+			check_near(s.total_moment_world(p0).dot(Vector3.RIGHT), 0.0, 1.0e-7 * s.normal_load() * R, "%s: geometric axle moment of the symmetric footprint" % label)
+			check_near(rig["wheel"].angular_velocity.x, -spin, 1.0e-9 + 1.0e-9 * spin, "%s: the spin changed" % label)
+
+
+## Row convention, independent of the solver dynamics: ConstraintRow.apply_impulse(lambda) is the solver's own impulse application
+## (domega = I_w^-1 J_ang lambda). Prescribed, deliberately ASYMMETRIC sample impulses (fore-aft and lateral gradients) are applied
+## to the wheel through the installed rows; the resulting angular impulse I_w domega must equal the moment of the normal impulses at the
+## ACTUAL sample positions, sum_i (x_i - p) x n lambda_i, computed here from the independent Stage A positions. The fore-aft gradient gives a
+## non-zero component along the axle (= -z offset times lambda for n = +Y, u = +X); the axle-projected rows of the first Stage B version
+## drop exactly that component, so this test fails for them (measured: the expected axle component is 18 % of |L|, the projected one 0).
+func test_e_row_angular_impulse_is_the_moment_of_the_normal_impulse_at_the_sample() -> void:
+	for camber in [0.0, 0.15]:
+		var rig: Dictionary = make_rig({"mass": 100.0, "height": R - DELTA * cos(camber), "camber": camber, "lat": 9, "circ": 48})
+		var wheel: SimRigidBody = rig["wheel"]
 		var s = rig["support"]
-		if spin == 0.0:
-			base = {"load": s.normal_load(), "count": s.active_sample_count(), "moment": s.applied_wheel_moment()}
-		else:
-			check_near(s.normal_load(), base["load"], 1.0e-9 * base["load"], "spin %s rad/s changed the normal load" % spin)
-			check(s.active_sample_count() == base["count"], "spin changed the footprint")
-		check_near(s.applied_wheel_moment().dot(Vector3.RIGHT), 0.0, 0.0, "spin %s rad/s: the patch applied a moment about the axle" % spin)
-		check_near(rig["wheel"].angular_velocity.x, -spin, 1.0e-12, "spin %s rad/s: the spin changed" % spin)
+		var label: String = "camber %s" % camber
+		var p0: Vector3 = wheel.position
+		var oracle: Dictionary = TirePatchSampler.sample(p0, wheel.orientation, geo(), R, Vector3.ZERO, Vector3.UP, 9, 48)
+		var by_index: Dictionary = {}
+		for smp in oracle["samples"]:
+			by_index[sample_index(smp, 48)] = smp
+		var u: Vector3 = (wheel.orientation * Vector3.RIGHT).normalized()
+		s.prepare(DT, rig["world"].config)
+		check(s.rows.size() > 8, "%s: fixture error: the footprint must hold several samples" % label)
+		var lateral_positions: Dictionary = {}
+		var expected_impulse: Vector3 = Vector3.ZERO
+		var expected_angular: Vector3 = Vector3.ZERO
+		var report: Array = s.sample_report()
+		for k in s.rows.size():
+			var pos: Vector3 = by_index[report[k]["index"]]["position"]
+			var arm: Vector3 = pos - p0
+			lateral_positions[snappedf(arm.dot(u), 1.0e-4)] = true
+			# Asymmetric positive impulses: a load-like base with fore-aft (z) and lateral (x) gradients.
+			var lambda: float = report[k]["area"] * (-report[k]["gap"]) * 1.0e6 * (1.0 - 4.0 * arm.z + 3.0 * arm.x)
+			check(lambda > 0.0, "%s: fixture error: impulses must stay positive" % label)
+			s.rows[k].accumulated_impulse = lambda
+			s.rows[k].apply_impulse(lambda)
+			expected_impulse += Vector3.UP * lambda
+			expected_angular += arm.cross(Vector3.UP) * lambda
+		check(lateral_positions.size() >= 3, "%s: the active samples must sit at several lateral positions" % label)
+		check(absf(expected_angular.dot(u)) > 0.1 * expected_angular.length(), "%s: fixture error: the expected moment must have an axle component" % label)
+		var inertia: Basis = wheel.inverse_inertia_world.inverse()
+		var angular_impulse: Vector3 = inertia * wheel.angular_velocity
+		check_vec3_near(angular_impulse, expected_angular, 1.0e-4 * expected_angular.length(), "%s: the solver's angular impulse is not the moment of the normal impulses" % label)
+		check_near(angular_impulse.dot(u), expected_angular.dot(u), 1.0e-4 * expected_angular.length(), "%s: axle component of the applied angular impulse" % label)
+		check_vec3_near(wheel.linear_velocity * wheel.mass, expected_impulse, 1.0e-4 * expected_impulse.length(), "%s: linear impulse" % label)
+		# The reported moment is the same quantity: applied_wheel_moment() * dt (loads = impulse / dt), and the geometric one agrees.
+		s.finish()
+		check_vec3_near(s.applied_wheel_moment() * DT, angular_impulse, 1.0e-4 * angular_impulse.length(), "%s: reported applied moment differs from the solver's" % label)
+		check_vec3_near(s.total_moment_world(p0) * DT, angular_impulse, 1.0e-4 * angular_impulse.length(), "%s: geometric moment differs from the solver's" % label)
+
+
+## End-to-end, with REAL loads from the solver: the angular velocity change of one step (I_w domega, the solver's own impulse application
+## including the soft rows) equals the moment of the sample loads (from sample_report) about the start-of-step centre, with the independent
+## sampler positions, for a cambered, yawed and translating wheel with ZERO angular velocity (a spinning heavy wheel would add the solver's gyroscopic update to
+## the comparison); the diagnostics agree.
+func test_e_solver_applied_moment_matches_the_geometric_moment_of_the_sample_loads() -> void:
+	var q: Quaternion = Quaternion(Vector3(0.0, 1.0, 0.0), 0.4) * Quaternion(Vector3(0.0, 0.0, 1.0), 0.15)
+	var rig: Dictionary = make_rig({"mass": HEAVY, "orientation": q, "position": Vector3(0.1, R - 0.018, -0.2), "lat": 17, "circ": 96,
+		"velocity": Vector3(0.5, -0.3, -1.0)})
+	var wheel: SimRigidBody = rig["wheel"]
+	var s = rig["support"]
+	var p0: Vector3 = wheel.position
+	var oracle: Dictionary = TirePatchSampler.sample(p0, wheel.orientation, geo(), R, Vector3.ZERO, Vector3.UP, 17, 96)
+	var by_index: Dictionary = {}
+	for smp in oracle["samples"]:
+		by_index[sample_index(smp, 96)] = smp
+	var inertia: Basis = wheel.inverse_inertia_world.inverse()
+	var l0: Vector3 = Vector3.ZERO
+	rig["world"].step()
+	var report: Array = s.sample_report()
+	check(report.size() > 20 and s.normal_load() > 0.0, "fixture error: the tilted wheel must be loaded")
+	var expected: Vector3 = Vector3.ZERO
+	for entry in report:
+		expected += (by_index[entry["index"]]["position"] - p0).cross(Vector3.UP) * entry["load"] * DT
+	var delta_l: Vector3 = wheel.inverse_inertia_world.inverse() * wheel.angular_velocity - l0
+	# World inertia is evaluated at the start/end orientation (the heavy wheel turns by ~1e-7 rad), so the comparison is exact to float32.
+	check_vec3_near(delta_l, expected, 1.0e-3 * expected.length() + 1.0e-6, "the solver's angular impulse is not the moment of the sample loads")
+	check(expected.length() > 0.1, "fixture error: the moment must be substantial")
+	check_vec3_near(s.applied_wheel_moment() * DT, expected, 1.0e-4 * expected.length(), "applied_wheel_moment differs from the independent moment")
+	check_vec3_near(s.total_moment_world(p0) * DT, expected, 1.0e-4 * expected.length(), "total_moment_world differs from the independent moment")
 
 
 # ---------------------------------------------------------------- F: aggregate force and moment
@@ -758,6 +849,64 @@ func test_l_invalid_runtime_state_fails_safely_and_clears_the_patch() -> void:
 	s.reset_warm_start()
 	check(s.carried_row_count() == 0 and s.normal_load() == 0.0 and s.rows.is_empty() and not s.contact_active, "reset_warm_start must clear the patch")
 	check(velocity.is_finite(), "fixture sanity")
+
+
+## A finite, ACCEPTED parameter set whose derived coefficient overflows: k_A = 1e-305 N/m^3 with c_A = 0 gives k_i ~ 1e-309 N/m for a sample of
+## ~1e-4 m^2 and gamma = 1 / (dt (c + dt k)) > 1.8e308 (not representable). validate() cannot reject it without knowing the sample area and dt, so
+## the patch must be invalidated at prepare time: never a skipped sample, never partial support.
+func test_l_a_non_finite_derived_coefficient_invalidates_the_whole_patch() -> void:
+	var tiny: float = 1.0e-305
+	var rig: Dictionary = make_rig({"mass": 100.0, "height": R - 0.01, "lat": 9, "circ": 48, "k": tiny, "c": 0.0})
+	var wheel: SimRigidBody = rig["wheel"]
+	var s = rig["support"]
+	var config = rig["world"].config
+	# The input is finite and passes the parameter validation (the failure is NOT an input-validation failure).
+	check(is_finite(s.stiffness_density) and s.stiffness_density > 0.0 and is_finite(s.damping_density), "fixture error: finite parameters expected")
+	check(s.validate().is_empty() and s.is_valid(), "the parameters must be accepted by validate()")
+	# The failure is caused by a derived coefficient: with the independent sample areas, gamma is not finite for every compressed sample.
+	var oracle: Dictionary = TirePatchSampler.sample(wheel.position, wheel.orientation, geo(), R, Vector3.ZERO, Vector3.UP, 9, 48)
+	var compressed: int = 0
+	for smp in oracle["samples"]:
+		if smp["gap"] < 0.0:
+			compressed += 1
+			var coeff: Dictionary = TirePatchNormalSupport.soft_coefficients(tiny * smp["weight"], 0.0, DT)
+			check(not is_finite(coeff["gamma"]), "fixture error: gamma must overflow for the sample with area %s" % smp["weight"])
+	check(compressed > 5, "fixture error: the wheel must be compressed (%d samples)" % compressed)
+	# Carried state to clear: a loaded valid patch first, then the same patch with the tiny stiffness.
+	s.stiffness_density = K_A
+	s.damping_density = C_A
+	for i in 5:
+		rig["world"].step()
+	check(s.carried_row_count() > 0 and s.carried_impulse_total() > 0.0 and s.normal_load() > 0.0, "fixture error: a loaded patch with carried impulses expected")
+	s.stiffness_density = tiny
+	s.damping_density = 0.0
+	check(s.is_valid(), "the edited patch is still valid by validate()")
+	var v0: Vector3 = wheel.linear_velocity
+	var w0: Vector3 = wheel.angular_velocity
+	s.prepare(DT, config)
+	check(not s.contact_active and s.rows.is_empty() and s.active_sample_count() == 0, "an invalid derived coefficient must leave no active rows")
+	check(s.last_reason.begins_with("invalid derived coefficient: gamma"), "last_reason must name the coefficient (got '%s')" % s.last_reason)
+	check(s.last_reason.contains("sample") and s.last_reason.contains("lateral") and s.last_reason.contains("angular"), "last_reason must identify the sample (got '%s')" % s.last_reason)
+	check(s.carried_row_count() == 0 and s.carried_impulse_total() == 0.0, "no stale sample impulse may remain")
+	check(s.normal_load() == 0.0 and s.contact_area() == 0.0 and s.sample_report().is_empty(), "no physical load or report may remain")
+	s.solve_iteration()
+	s.solve_split_iteration()
+	s.finish()
+	check(s.normal_load() == 0.0 and s.applied_wheel_moment() == Vector3.ZERO, "no load or moment after the invalid preparation")
+	check_vec3_near(wheel.linear_velocity, v0, 0.0, "no partial support may reach the wheel (linear)")
+	check_vec3_near(wheel.angular_velocity, w0, 0.0, "no partial support may reach the wheel (angular)")
+	# Deterministic: the same failure and reason again, and a world step applies nothing to the wheel.
+	var reason: String = s.last_reason
+	s.prepare(DT, config)
+	check(s.last_reason == reason and s.rows.is_empty(), "the failure must be deterministic")
+	rig["world"].step()
+	check_vec3_near(wheel.linear_velocity, v0, 0.0, "a world step with the invalid patch must not accelerate the wheel (no gravity)")
+	check(s.rows.is_empty() and s.carried_row_count() == 0 and s.normal_load() == 0.0, "the patch stays empty through a world step")
+	# Recovery: a valid stiffness gives a fresh patch (cold start).
+	s.stiffness_density = K_A
+	s.damping_density = C_A
+	rig["world"].step()
+	check(s.contact_active and s.normal_load() > 0.0 and s.last_reason == "", "valid parameters must restore the support")
 
 
 # ---------------------------------------------------------------- M: determinism
