@@ -45,14 +45,14 @@ func geo() -> TireGeometry:
 
 
 ## Rig options: mass, height (wheel centre), camber, normal, plane_point, position, orientation, velocity, angular_velocity,
-## gravity (positive number), k, c, dmax, lat, circ, fixture (vertical-only test fixture). Returns {world, ground, wheel, support}.
+## gravity (positive number), k, c, dmax, lat, circ, inertia (body-frame Basis override), fixture (vertical-only test fixture). Returns {world, ground, wheel, support}.
 func make_rig(opts: Dictionary = {}) -> Dictionary:
 	var mass: float = opts.get("mass", 100.0)
 	var q: Quaternion = opts.get("orientation", Quaternion(Vector3(0.0, 0.0, 1.0), opts.get("camber", 0.0)))
 	var w: SimWorld = make_world(Vector3(0.0, -opts.get("gravity", 0.0), 0.0))
 	var ground: SimRigidBody = make_static()
 	var pos: Vector3 = opts.get("position", Vector3(0.0, opts.get("height", R), 0.0))
-	var wheel: SimRigidBody = make_body(mass, MotorcycleConfig.wheel_inertia(mass, R, 0.75 * R, W), pos, q)
+	var wheel: SimRigidBody = make_body(mass, opts.get("inertia", MotorcycleConfig.wheel_inertia(mass, R, 0.75 * R, W)), pos, q)
 	wheel.linear_velocity = opts.get("velocity", Vector3.ZERO)
 	wheel.angular_velocity = opts.get("angular_velocity", Vector3.ZERO)
 	w.add_body(ground)
@@ -383,7 +383,7 @@ func test_e_normal_response_acts_along_the_plane_normal_at_the_sample_positions(
 		check_vec3_near(row.linear_b, n, 1.0e-6, "the wheel-side row direction is not the ground normal")
 		check_vec3_near(row.linear_a, -n, 1.0e-6, "the ground-side row direction is not minus the ground normal")
 		# The lever arm is the ACTUAL sample position relative to the wheel centre (independent Stage A position): the full moment of a normal
-		# impulse there, with nothing removed (the axle component is part of the wrench; the spin is handled in the row bias, see test_e_spin).
+		# impulse there, with nothing removed (the axle component is part of the wrench; the spin is excluded from the velocity-side Jacobian only, see test_n_*).
 		var arm: Vector3 = (smp["position"] - pos0).cross(n)
 		check_vec3_near(row.angular_b, arm, 1.0e-6, "the row does not act at the sample position")
 		check_vec3_near(row.angular_a, -(smp["position"] - ground.position).cross(n), 1.0e-6, "the ground-side lever arm is not the sample position")
@@ -394,19 +394,26 @@ func test_e_normal_response_acts_along_the_plane_normal_at_the_sample_positions(
 	check(dv.dot(n) > 0.0, "the support must push the wheel away from the plane")
 	check_near(dv.dot(tangent), 0.0, 1.0e-9, "no tangential velocity change (the patch has no friction)")
 	check_near(dv.cross(n).length(), 0.0, 1.0e-6 * dv.length(), "the velocity change is not along the ground normal")
-	# The quasi-static footprint is fore-aft symmetric, so the true moment about the axle vanishes up to rounding of the sample loads.
-	# Scale-aware bound: the axle angular impulse is rounding of the float32 sample arithmetic on the inclined plane (measured 5e-7 of N R dt
-	# for this 100 kg wheel at 40 rad/s; bound 2e-6), not a physical axle moment: a real fore-aft asymmetry would be orders larger (>0.1 N R).
-	var axle_impulse: float = (wheel.inverse_inertia_world.inverse() * (wheel.angular_velocity - w0)).dot(u)
-	check_near(axle_impulse, 0.0, 2.0e-6 * s.normal_load() * R * DT, "no change of the spin (the symmetric footprint has no moment about the axle)")
+	# The quasi-static footprint is fore-aft symmetric, so the true moment about the axle vanishes. Two independent checks:
+	# (1) the moment of the sample loads about the axle (no inertia, no stored spin involved): zero up to the rounding of the sample loads
+	#     (measured 4e-8 N R; bound 1e-7 N R);
+	# (2) the change of the stored spin, measured as an angular impulse I_axial d(omega . u). The wheel spins at 40 rad/s, so the stored world
+	#     angular velocity resolves only 2^-23 * 40 = 4.8e-6 rad/s (one float32 ulp at 40); the measured change is 1.1e-5 rad/s (about 3 ulp of
+	#     rounding, even in the spin and zero without spin), i.e. 8.6e-5 N m s. The bound is 6 ulp of the spin times the axial inertia (2.1e-4),
+	#     still 1000 times below the 0.24 N m s a real 13 % axle moment would deliver. The previous bound (2e-6 N R dt = 3.7e-6 N m s) held only
+	#     because the rounding happened to be 5e-7 N R dt with the earlier row arithmetic; it is a stored-spin resolution, not a physical effect.
+	check_near(s.applied_wheel_moment().dot(u), 0.0, 1.0e-7 * s.normal_load() * R, "the loads of the symmetric footprint have no moment about the axle")
+	var axial_inertia: float = MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W).x.x
+	var axle_impulse: float = axial_inertia * (wheel.angular_velocity - w0).dot(u)
+	check_near(axle_impulse, 0.0, 6.0 * absf(w0.dot(u)) * pow(2.0, -23.0) * axial_inertia, "no change of the spin beyond the float32 resolution of the stored spin")
 	check_vec3_near(ground.linear_velocity, Vector3.ZERO, 0.0, "the static ground must take no velocity")
 	check_vec3_near(ground.angular_velocity, Vector3.ZERO, 0.0, "the static ground must take no angular velocity")
 
 
 func test_e_spin_does_not_change_the_normal_support() -> void:
 	# The tread is a surface of revolution: a spin about the axle must neither load the front of the footprint more than the rear nor change
-	# the load. The wrench keeps the full angular Jacobian; the tangent tread velocity is removed from the compression rate in the row BIAS
-	# (header of the constraint). Without that term the load grows +27 % / +76 % (c_A = 0) and +185 % / +412 % (c_A = 1e5) at 30 / 60 rad/s
+	# the load. The wrench keeps the full angular Jacobian; the tangent tread velocity is removed from the compression rate by the velocity-side
+	# Jacobian of the row (header of the constraint; test_n_*). Without it the load grows +27 % / +76 % (c_A = 0) and +185 % / +412 % (c_A = 1e5) at 30 / 60 rad/s
 	# and the moment about the axle is 13 % to 20 % of N R. Tolerances: the load is bit-for-bit independent of the spin up to float32
 	# rounding of the sample arithmetic (1e-9 relative); the true axle moment of the symmetric footprint vanishes up to that rounding
 	# (measured up to 1e-8 N R; bound 1e-7 N R; it was exactly 0 only while the axle component was cut out of the wrench).
@@ -907,6 +914,257 @@ func test_l_a_non_finite_derived_coefficient_invalidates_the_whole_patch() -> vo
 	s.damping_density = C_A
 	rig["world"].step()
 	check(s.contact_active and s.normal_load() > 0.0 and s.last_reason == "", "valid parameters must restore the support")
+
+
+# ---------------------------------------------------------------- N: velocity-side Jacobian vs impulse-side wrench
+
+## Stiff compliance with a LIGHT wheel (5 kg), used where the velocity-side effective mass must be distinguishable from the full-Jacobian one.
+## With the test compliance (k_A = 4e6, c_A = 1e5) the softness gamma = 1/(dt (c_i + dt k_i)) ~ 37 m/(N s^2) swamps K ~ 0.2 and the two
+## effective masses differ by ~3e-4. At the parameter maxima (k_A = 1e10, c_A = 1e9) gamma ~ 5e-3 and K_full - K_proj = (u . r x n)^2 / I_axial
+## reaches 0.26: the two effective masses differ by tens of percent, so a test can tell them apart by a wide margin. Test values only.
+const STIFF_K: float = 1.0e10
+const STIFF_C: float = 1.0e9
+## Light, low-axial-inertia body-frame inertia (m = 20 kg, I_axial = 0.2, I_transverse = 0.4 kg m^2: a thin disc-like wheel, I_a <= 2 I_t) so that
+## (u . r x n)^2 / I_axial (up to 0.06 for the footprint's fore-aft arms of ~0.1 m) is comparable to K_vel ~ 0.3 and the footprint has several samples
+## with an axle-parallel moment. Test values, not wheel data.
+const LIGHT_MASS: float = 20.0
+const LIGHT_INERTIA: Basis = Basis(Vector3(0.2, 0.0, 0.0), Vector3(0.0, 0.4, 0.0), Vector3(0.0, 0.0, 0.4))
+
+
+## Independent Stage A sample positions of the wheel's current pose by sample index.
+func oracle_positions(wheel: SimRigidBody, lat: int, circ: int) -> Dictionary:
+	var oracle: Dictionary = TirePatchSampler.sample(wheel.position, wheel.orientation, geo(), R, Vector3.ZERO, Vector3.UP, lat, circ)
+	var by_index: Dictionary = {}
+	for smp in oracle["samples"]:
+		by_index[sample_index(smp, circ)] = smp["position"]
+	return by_index
+
+
+## A. The effective mass of a row is 1/(K_vel + gamma) with K_vel = 1/m + J_v . I^-1 J_v and J_v = (r x n) - u (u . r x n), computed here from the
+## independent sample positions, not 1/(K_full + gamma) with the full physical Jacobian (which is what the impulse uses).
+func test_n_effective_mass_uses_the_velocity_side_jacobian() -> void:
+	for camber in [0.0, 0.15]:
+		var rig: Dictionary = make_rig({"mass": LIGHT_MASS, "inertia": LIGHT_INERTIA, "height": R - DELTA * cos(camber), "camber": camber, "k": STIFF_K, "c": STIFF_C, "lat": 9, "circ": 48})
+		var wheel: SimRigidBody = rig["wheel"]
+		var s = rig["support"]
+		var label: String = "camber %s" % camber
+		var p0: Vector3 = wheel.position
+		var positions: Dictionary = oracle_positions(wheel, 9, 48)
+		var u: Vector3 = (wheel.orientation * Vector3.RIGHT).normalized()
+		var inverse_inertia: Basis = wheel.inverse_inertia_world
+		s.prepare(DT, rig["world"].config)
+		var report: Array = s.sample_report()
+		check(s.rows.size() > 8, "%s: fixture error: the footprint must hold several samples" % label)
+		var distinguished: int = 0
+		for k in s.rows.size():
+			var row = s.rows[k]
+			var moment: Vector3 = (positions[report[k]["index"]] - p0).cross(Vector3.UP)  # r x n, the full physical moment arm
+			var projected: Vector3 = moment - u * u.dot(moment)
+			var gamma: float = TirePatchNormalSupport.soft_coefficients(STIFF_K * report[k]["area"], STIFF_C * report[k]["area"], DT)["gamma"]
+			var m_velocity: float = 1.0 / (1.0 / wheel.mass + projected.dot(inverse_inertia * projected) + gamma)
+			var m_full: float = 1.0 / (1.0 / wheel.mass + moment.dot(inverse_inertia * moment) + gamma)
+			check_near(row.effective_mass, m_velocity, 1.0e-4 * m_velocity, "%s sample %d: the effective mass is not that of the velocity-side Jacobian" % [label, k])
+			if absf(moment.dot(u)) > 0.06:
+				distinguished += 1
+				check(absf(m_velocity - m_full) > 0.1 * m_full, "%s sample %d: fixture error: the two effective masses must differ by > 10 %%" % [label, k])
+				check(absf(row.effective_mass - m_full) > 0.08 * m_full, "%s sample %d: the effective mass is the full-Jacobian value" % [label, k])
+		check(distinguished >= 3, "%s: fixture error: several samples must have an axle-parallel moment component > 0.06 m (got %d)" % [label, distinguished])
+
+
+## B. The compression velocity of every sample is independent of the axle spin: for identical translational velocity and non-axle angular
+## velocity, the row's own velocity (compute_velocity, i.e. the solver's measurement, not the bias) equals n . (v + w_perp x r) from the
+## independent sample positions, and the normal support does not change. Without the projection the 60 rad/s spin would add up to
+## 60 * 0.3 = 18 m/s to a sample (measured here against the margin of the tolerance). Tolerances: J_v is perpendicular to u only to float32
+## rounding (6e-8 * |J| = 2e-8, times 60 rad/s ~ 1e-6 m/s): 5e-6 m/s; loads: 1e-6 relative.
+func test_n_compression_velocity_and_support_are_independent_of_the_axle_spin() -> void:
+	var camber: float = 0.15
+	var q: Quaternion = Quaternion(Vector3(0.0, 0.0, 1.0), camber)
+	var u: Vector3 = q * Vector3.RIGHT
+	var perpendicular: Vector3 = q * Vector3(0.0, 0.5, 0.3)  # angular velocity with no axle component
+	var v: Vector3 = Vector3(0.2, -0.1, -1.5)
+	var reference_vn: Array = []
+	var reference_loads: Array = []
+	var reference_total: float = 0.0
+	for spin in [0.0, 30.0, 60.0]:
+		var omega: Vector3 = perpendicular - u * spin
+		var label: String = "spin %s rad/s" % spin
+		# Velocity level (light wheel, no step).
+		var rig: Dictionary = make_rig({"mass": LIGHT_MASS, "inertia": LIGHT_INERTIA, "height": R - DELTA * cos(camber), "camber": camber, "velocity": v, "angular_velocity": omega, "lat": 9, "circ": 48})
+		var wheel: SimRigidBody = rig["wheel"]
+		var s = rig["support"]
+		var p0: Vector3 = wheel.position
+		var positions: Dictionary = oracle_positions(wheel, 9, 48)
+		s.prepare(DT, rig["world"].config)
+		var report: Array = s.sample_report()
+		check(s.rows.size() > 8, "%s: fixture error: the footprint must hold several samples" % label)
+		var max_spin_term: float = 0.0
+		for k in s.rows.size():
+			var arm: Vector3 = positions[report[k]["index"]] - p0
+			var expected: float = Vector3.UP.dot(v + perpendicular.cross(arm))
+			var measured: float = s.rows[k].compute_velocity()
+			check_near(measured, expected, 5.0e-6, "%s sample %d: the compression velocity is not n . (v + w_perp x r)" % [label, k])
+			max_spin_term = maxf(max_spin_term, absf(spin * u.dot(arm.cross(Vector3.UP))))
+			if spin == 0.0:
+				reference_vn.append(measured)
+			else:
+				check_near(measured, reference_vn[k], 5.0e-6, "%s sample %d: the axle spin changed the compression velocity" % [label, k])
+		check(spin == 0.0 or max_spin_term > 1.0, "%s: fixture error: the spin term must be large against the tolerance (got %s m/s)" % [label, max_spin_term])
+		# Support level (heavy wheel, damping on): the solver's own iterations driven directly, so that the world's gyroscopic update (which turns
+		# w_perp of a spinning wheel before the solve and is not part of the row model) does not enter the comparison.
+		var heavy: Dictionary = heavy_rig(17, 96, camber, DELTA, {"velocity": v, "angular_velocity": omega})
+		var support = heavy["support"]
+		support.prepare(DT, heavy["world"].config)
+		for iteration in heavy["world"].config.solver_iterations:
+			support.solve_iteration()
+		support.finish()
+		var loads: Array = []
+		for entry in support.sample_report():
+			loads.append(entry["load"])
+		if spin == 0.0:
+			reference_loads = loads
+			reference_total = support.normal_load()
+			check(reference_total > 100.0, "fixture error: the heavy wheel must be loaded")
+		else:
+			check(loads.size() == reference_loads.size(), "%s: the spin changed the footprint" % label)
+			check_near(support.normal_load(), reference_total, 1.0e-6 * reference_total, "%s: the spin changed the normal load" % label)
+			for k in mini(loads.size(), reference_loads.size()):
+				check_near(loads[k], reference_loads[k], 1.0e-6 * reference_total / float(loads.size()) + 1.0e-6, "%s sample %d: the spin changed the sample load" % [label, k])
+
+
+## C. Spin changes DURING sequential solving. The solver applies each row's impulse through the full wrench, so the axle spin changes after
+## every row (the early rows of an unconverged pass load fore-aft asymmetrically, and the sample moments (u . r x n) lambda do not cancel).
+## (1) Live velocity side: after every solve_iteration the row's compression velocity is again n . (v + w_perp x r) with the wheel's CURRENT
+##     v and w_perp (axle component removed), while the axle spin has demonstrably changed: nothing is frozen at preparation.
+## (2) Independence of the axial inertia: a wheel with a 3.75 times larger axial inertia (its spin responds 3.75 times less) must give the same
+##     sample loads, because the velocity map and the effective mass contain no axle spin; each wheel's spin change equals the FULL physical axle
+##     moment sum_i (u . r_i x n) lambda_i / I_axial of the solver's own loads. A frozen-bias compensation (full Jacobian for rate and effective mass,
+##     initial spin subtracted from the bias) fails (1) at once and (2) through the feedback of the changed spin on the later rows.
+func test_n_axle_spin_change_during_sequential_solving_does_not_feed_back() -> void:
+	var camber: float = 0.15
+	var q: Quaternion = Quaternion(Vector3(0.0, 0.0, 1.0), camber)
+	var u: Vector3 = q * Vector3.RIGHT
+	var v0: Vector3 = Vector3(0.1, -0.6, -0.4)
+	var perpendicular: Vector3 = q * Vector3(0.0, 0.2, 0.1)
+	var spin0: float = 25.0
+	var light_inertia: Basis = LIGHT_INERTIA
+	# (1) live velocity side, iteration by iteration
+	var rig: Dictionary = make_rig({"mass": LIGHT_MASS, "inertia": LIGHT_INERTIA, "height": R - DELTA * cos(camber), "camber": camber, "velocity": v0, "angular_velocity": perpendicular - u * spin0,
+			"k": STIFF_K, "c": STIFF_C, "lat": 9, "circ": 48})
+	var wheel: SimRigidBody = rig["wheel"]
+	var s = rig["support"]
+	var p0: Vector3 = wheel.position
+	var positions: Dictionary = oracle_positions(wheel, 9, 48)
+	s.prepare(DT, rig["world"].config)
+	var report: Array = s.sample_report()
+	check(s.rows.size() > 8, "fixture error: the footprint must hold several samples")
+	var spin_before: float = wheel.angular_velocity.dot(u)
+	var largest_spin_change: float = 0.0
+	for iteration in 3:
+		s.solve_iteration()
+		var spin_now: float = wheel.angular_velocity.dot(u)
+		largest_spin_change = maxf(largest_spin_change, absf(spin_now - spin_before))
+		var w_perp: Vector3 = wheel.angular_velocity - u * spin_now
+		for k in s.rows.size():
+			var arm: Vector3 = positions[report[k]["index"]] - p0
+			var expected: float = Vector3.UP.dot(wheel.linear_velocity + w_perp.cross(arm))
+			check_near(s.rows[k].compute_velocity(), expected, 2.0e-5, "iteration %d sample %d: the compression velocity is not n . (v + w_perp x r) of the current state" % [iteration, k])
+	check(largest_spin_change > 0.05, "fixture error: the sequential impulses must change the axle spin (got %s rad/s)" % largest_spin_change)
+	# (2) the same wheel with a 3.75 times larger axial inertia: its spin responds 3.75 times less to the same axle moment. If the changed spin fed
+	# back into the normal solve (full Jacobian in the rate or in K), the loads would depend on the axial inertia. 0.75 is the largest axial inertia
+	# the triangle inequality I_a <= I_t + I_t (0.8) of a valid body allows with margin.
+	for iterations in [1, 2, 4]:
+		var loads_by_inertia: Array = []
+		var spin_change_by_inertia: Array = []
+		var impulse_by_inertia: Array = []
+		var peak_load: float = 0.0
+		for axial in [0.2, 0.75]:
+			var step_rig: Dictionary = make_rig({"mass": LIGHT_MASS, "height": R - DELTA * cos(camber), "camber": camber, "velocity": v0, "angular_velocity": perpendicular - u * spin0,
+					"k": STIFF_K, "c": STIFF_C, "lat": 9, "circ": 48, "inertia": Basis.from_scale(Vector3(axial, 0.4, 0.4))})
+			var body: SimRigidBody = step_rig["wheel"]
+			var support = step_rig["support"]
+			var start: Vector3 = body.position
+			var by_index: Dictionary = oracle_positions(body, 9, 48)
+			var spin_start: float = body.angular_velocity.dot(u)
+			# The solver's own iterations driven directly: the world's gyroscopic update (which depends on the axial inertia and is applied
+			# before the solve) is not part of the row model and must not enter the comparison.
+			support.prepare(DT, step_rig["world"].config)
+			for iteration in iterations:
+				support.solve_iteration()
+			support.finish()
+			var loads: Array = []
+			var impulse: float = 0.0
+			for entry in support.sample_report():
+				loads.append(entry["load"])
+				peak_load = maxf(peak_load, entry["load"])
+				impulse += u.dot((by_index[entry["index"]] - start).cross(Vector3.UP)) * entry["load"] * DT
+			loads_by_inertia.append(loads)
+			impulse_by_inertia.append(impulse)
+			spin_change_by_inertia.append(body.angular_velocity.dot(u) - spin_start)
+		var label: String = "%d iteration(s)" % iterations
+		check(loads_by_inertia[0].size() > 8 and loads_by_inertia[0].size() == loads_by_inertia[1].size(), "%s: the two wheels must have the same footprint" % label)
+		for k in mini(loads_by_inertia[0].size(), loads_by_inertia[1].size()):
+			check_near(loads_by_inertia[0][k], loads_by_inertia[1][k], 1.0e-4 * peak_load, "%s sample %d: the axle spin change fed back into the normal solve" % [label, k])
+		# Each wheel's spin changed by the FULL physical axle moment of its own loads divided by its own axial inertia.
+		check(absf(impulse_by_inertia[0]) > 1.0e-3, "%s: fixture error: the loads must carry a real axle moment (got %s N m s)" % [label, impulse_by_inertia[0]])
+		check_near(spin_change_by_inertia[0] * 0.2, impulse_by_inertia[0], 1.0e-3 * absf(impulse_by_inertia[0]) + 1.0e-5, "%s: the spin change of the 0.2 kg m^2 wheel is not the full axle moment of its loads" % label)
+		check_near(spin_change_by_inertia[1] * 0.75, impulse_by_inertia[1], 1.0e-3 * absf(impulse_by_inertia[1]) + 1.0e-5, "%s: the spin change of the 0.75 kg m^2 wheel is not the full axle moment of its loads" % label)
+		check(absf(spin_change_by_inertia[0]) > 2.5 * absf(spin_change_by_inertia[1]), "%s: fixture error: the two wheels must change their spin by very different amounts" % label)
+
+
+## The two row Jacobians are distinct, independent quantities: the impulse side keeps the FULL moment r x n (axle component included), the velocity
+## side is the same vector minus its axle component, and the physical impulse applied through the row changes the axle spin while the velocity
+## map is blind to the axle.
+func test_n_row_holds_a_full_wrench_and_a_projected_velocity_jacobian() -> void:
+	for camber in [0.0, 0.15]:
+		var rig: Dictionary = make_rig({"mass": 100.0, "height": R - DELTA * cos(camber), "camber": camber, "lat": 9, "circ": 48})
+		var wheel: SimRigidBody = rig["wheel"]
+		var s = rig["support"]
+		var label: String = "camber %s" % camber
+		var p0: Vector3 = wheel.position
+		var positions: Dictionary = oracle_positions(wheel, 9, 48)
+		var u: Vector3 = (wheel.orientation * Vector3.RIGHT).normalized()
+		s.prepare(DT, rig["world"].config)
+		var report: Array = s.sample_report()
+		var with_axle_component: int = 0
+		for k in s.rows.size():
+			var row = s.rows[k]
+			var moment: Vector3 = (positions[report[k]["index"]] - p0).cross(Vector3.UP)
+			var velocity_side = row.get("velocity_angular_b")
+			check(velocity_side != null, "%s: the row has no velocity-side angular Jacobian" % label)
+			if velocity_side == null:
+				return
+			check_vec3_near(row.angular_b, moment, 1.0e-6, "%s sample %d: the impulse Jacobian is not the full r x n" % [label, k])
+			check_vec3_near(velocity_side, moment - u * u.dot(moment), 1.0e-6, "%s sample %d: the velocity-side Jacobian is not (r x n) minus its axle component" % [label, k])
+			check_near(velocity_side.dot(u), 0.0, 1.0e-6, "%s sample %d: the velocity-side Jacobian has an axle component" % [label, k])
+			check_vec3_near(row.linear_b, Vector3.UP, 1.0e-6, "%s sample %d: the linear Jacobian is shared" % [label, k])
+			if absf(moment.dot(u)) > 0.05:
+				with_axle_component += 1
+		check(with_axle_component >= 3, "%s: fixture error: several samples must have an axle-parallel moment (got %d)" % [label, with_axle_component])
+
+
+## Split correction: it is a POSE correction along the velocity-side Jacobian and never the physical wrench. One sequential split pass over
+## a bottomed footprint is fore-aft asymmetric (ordering), so a physical wrench would leave an axle component in the split angular velocity;
+## the velocity-side Jacobian leaves none. The physical velocities are untouched by the split pass.
+func test_n_split_correction_does_not_apply_the_axle_moment_and_leaves_physical_velocity_alone() -> void:
+	var rig: Dictionary = make_rig({"mass": 5.0, "height": R - 0.07, "dmax": 0.05, "k": STIFF_K, "c": STIFF_C, "lat": 9, "circ": 48,
+			"angular_velocity": Vector3(-20.0, 0.0, 0.0)})
+	var wheel: SimRigidBody = rig["wheel"]
+	var s = rig["support"]
+	s.prepare(DT, rig["world"].config)
+	check(s.bottomed_sample_count() > 10, "fixture error: many samples must be bottomed (got %d)" % s.bottomed_sample_count())
+	var linear0: Vector3 = wheel.linear_velocity
+	var angular0: Vector3 = wheel.angular_velocity
+	s.solve_split_iteration()
+	var split_perp: float = (wheel.split_angular_velocity - Vector3.RIGHT * wheel.split_angular_velocity.x).length()
+	var wrench_axle: float = 0.0
+	for k in s.rows.size():
+		if s.rows[k].split_enabled:
+			wrench_axle += s.rows[k].angular_b.x * s.rows[k].split_accumulated_impulse
+	check(wheel.split_linear_velocity.y > 0.0, "the split correction must push the wheel out of the plane")
+	check(absf(wrench_axle) > 1.0e-3 * wheel.split_linear_velocity.y * wheel.mass or split_perp > 0.0, "fixture error: the split pass must be asymmetric or non-trivial")
+	check_near(wheel.split_angular_velocity.x, 0.0, 1.0e-6 * maxf(1.0, wheel.split_angular_velocity.length()), "the split correction spun the wheel about its axle")
+	check_vec3_near(wheel.linear_velocity, linear0, 0.0, "the split pass changed the physical linear velocity")
+	check_vec3_near(wheel.angular_velocity, angular0, 0.0, "the split pass changed the physical angular velocity")
 
 
 # ---------------------------------------------------------------- M: determinism

@@ -2,7 +2,8 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## M2.5.3 Stage B: area-weighted compliant NORMAL support of one finite-width tyre on a static ground plane.
 ## ONE aggregate constraint per wheel (body A = static ground, body B = wheel) that owns one scalar compliant normal row per
 ## physically compressed tyre-surface sample of TirePatchSampler (Stage A). Motorcycle-level; the generic solver, ContactConstraint,
-## ConstraintRow and SimWorld are NOT changed: the rows use the existing `softness` (regularisation) and `bias` fields.
+## ConstraintRow and SimWorld are NOT changed: the rows are VelocityJacobianRow (a ConstraintRow subclass that adds a velocity-side angular
+## Jacobian) and use the existing `softness` (regularisation) and `bias` fields.
 ## It carries NO tangential row, no slip, no rolling resistance and no tyre-force model, and it is not registered by the motorcycle
 ## builder (Stage D). Units and equations: PHYSICS_CONVENTIONS.md ("Tyre patch normal support (M2.5.3 Stage B)").
 ##
@@ -28,33 +29,34 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## k_A, c_A, A_i and dt. Unconditionally stable for any positive k_i, c_i (implicit). The implicit look-ahead adds a numerical damping dt k_i, so the
 ## effective damping per sample is c_i + dt k_i (c_A + dt k_A per unit area): for k_A = 4e6 N/m^3 and dt = 1/120 s that is 3.3e4 N s/m^3.
 ##
-## ---- Sample-point moment (the row Jacobian is the full wrench of a normal impulse at the sample) ----
-## ConstraintRow applies an impulse lambda as dv_B = M^-1 J_lin lambda and domega_B = I_w^-1 J_ang lambda, and the same J gives
-## Cdot = J . v. A normal impulse lambda_i n acting at the sample position x_i on the wheel (centre p, r_i = x_i - p) is the wrench
-## (force n lambda_i, moment r_i x n lambda_i about p), so the wheel-side row is exactly  J_lin = n,  J_ang = r_i x n,  with no component
-## removed: the angular impulse the solver applies is the moment of the normal impulse at its actual sample position, and
-## `total_moment_world(wheel.position)` and `applied_wheel_moment()` are the same sum  sum_i (r_i x n) F_i  (applied_wheel_moment reads the
-## installed rows' angular Jacobians, total_moment_world the sample positions; they agree to rounding). The axle component
-## (r_i x n) . u of a sample moment is real: it is the fore-aft offset of the sample's line of action from the wheel centre times the load
-## (zero for the quasi-static footprint, which is symmetric fore-aft, and non-zero whenever the loads are fore-aft asymmetric).
-## ---- Spin about the axle is removed from the compression RATE, not from the wrench ----
-## The single row Jacobian is both the velocity map (Cdot = J . v) and the wrench map, so with the full J_ang = r_i x n the sample velocity
-## entering vn_i is the rigid-body point velocity n . (v + omega x r_i), which contains the spin term (omega . u)(u . (r_i x n)). The tread is a
-## surface of revolution about the axle u: a spin maps the surface onto itself, so that term is the TANGENT material velocity of the tread, not
-## a rate of compression. Left in, it makes the damper and the implicit look-ahead (dt k vn') load the leading samples of the footprint more
-## than the trailing ones: probe (full Jacobian, no compensation, 17x96 samples, 2 cm compression, rolling at 30 and 60 rad/s): load +27 % and
-## +76 % with c_A = 0, +185 % and +412 % with c_A = 1e5, and a moment about the axle of 13 % to 20 % of N R (a hidden rolling resistance).
-## A first version of Stage B removed the axle component from J_ang; that also removed it from the wrench, so the solver moment disagreed with
-## the geometric moment of the loads (rejected). Here the wrench keeps the full J_ang and the rate is corrected in the row BIAS, a separate,
-## documented velocity-level term (the bias is a free scalar of the row, so the wrench is untouched):
-##   spin_bias_i = -(omega_B . u)(u . (r_i x n)),   omega_B and u taken at prepare (start of step);   bias_i += spin_bias_i.
-## At the start of the step Cdot_i + spin_bias_i = n . v_c + (omega - (omega . u) u) . (r_i x n): the spin does not enter vn_i, exactly as for
-## the surface of revolution. The term is frozen over the step like the Jacobian (the frozen-Jacobian limitation of the project); a change of
-## the axle spin DURING the step (by the patch's own axle moment or by another constraint) is still seen by the row through J_ang. For
-## bottomed (rigid) rows it is the only bias, so a spinning bottomed tyre is not pushed by tangential tread velocity either. Real axle moments
-## stay real: for the quasi-static footprint the loads are fore-aft symmetric and the moment about the axle is zero; any fore-aft asymmetric
-## load acts with its true moment. No tangential row exists here: the in-plane and spin responses of the tyre are not modelled by this
-## constraint (Stage C).
+## ---- Two Jacobians per row: the physical wrench and the compression-rate map (VelocityJacobianRow) ----
+## IMPULSE SIDE (the physical wrench). A normal impulse lambda_i n acting at the sample position x_i on the wheel (centre p, r_i = x_i - p) is
+## the wrench (force n lambda_i, moment r_i x n lambda_i about p), so the impulse Jacobian is exactly  J_imp_lin = n,  J_imp_ang = r_i x n,
+## with no component removed: the angular impulse the solver applies (warm start and every solve) is the moment of the normal impulse at its
+## actual sample position, and `total_moment_world(wheel.position)` and `applied_wheel_moment()` are the same sum  sum_i (r_i x n) F_i
+## (applied_wheel_moment reads the installed rows' impulse angular Jacobians, total_moment_world the sample positions; they agree to
+## rounding). The axle component (r_i x n) . u of a sample moment is real: it is the fore-aft offset of the sample's line of action from the
+## wheel centre times the load (zero for the quasi-static footprint, which is symmetric fore-aft, and non-zero whenever the loads are fore-aft
+## asymmetric).
+## VELOCITY SIDE (compression rate and effective mass). The tread is a surface of revolution about the axle u: a spin maps the surface onto
+## itself, so the velocity that a spin induces at a sample, (omega . u)(u . (r_i x n)) in the row rate, is the TANGENT material
+## velocity of the tread, not a rate of compression. Left in the rate, it makes the damper and the implicit look-ahead (dt k vn') load the
+## leading samples of the footprint more than the trailing ones (probe, full Jacobian for everything, 17x96 samples, 2 cm compression, rolling
+## at 30 and 60 rad/s: load +27 % and +76 % with c_A = 0, +185 % and +412 % with c_A = 1e5, and a moment about the axle of 13 % to 20 % of
+## N R, a hidden rolling resistance). The row therefore measures and weighs the compression with the axle-projected angular Jacobian
+##   J_vel_lin = n,   J_vel_ang = (r_i x n) - u (u . (r_i x n)),
+##   vn_i = J_vel . v   (compute_velocity, from the CURRENT velocities in every iteration),   K_i = (1/m) |n|^2 + J_vel_ang . I_w^-1 . J_vel_ang
+## (compute_k; effective mass 1/(K_i + gamma_i)). The two maps are deliberately different (VelocityJacobianRow): J_vel_ang is the rate map, J_imp_ang
+## is the real moment, and neither is derived from the other. Because J_vel_ang is perpendicular to u, no change of the axle spin enters vn_i
+## or K_i, not at preparation and not in later sequential iterations when the patch's own axle moment (or another constraint) changes the
+## spin; the wheel inertia is axisymmetric about u (u a principal axis), so the axle component of the wrench also does not leak into the
+## off-axle angular velocity through I_w^-1. A previous version removed the initial spin from a frozen row bias; that left the effective mass
+## and the later iterations on the full Jacobian (an axle-spin change still fed back into vn_i) and is gone: the bias is only the implicit
+## spring term k_i g_i / (c_i + dt k_i). The Jacobians and u are those of the start of the step (frozen-Jacobian limitation of the project);
+## the velocities are live. For bottomed (rigid) rows the same velocity map applies, so a spinning bottomed tyre is not pushed by tangential
+## tread velocity either. Split correction: the split row uses the velocity-side Jacobian to measure and to apply (a pose correction is the gradient of the
+## gap, which has no axle component; the physical wrench never enters the split velocities). No tangential row exists here: the in-plane and
+## spin responses of the tyre are not modelled by this constraint (Stage C).
 
 ## ---- Excessive penetration (bottoming) ----
 ## A sample compressed by more than `max_compression` (m) at the start of the step is BOTTOMED: its row becomes the rigid non-penetration
@@ -85,6 +87,7 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 
 const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const TirePatchSampler = preload("res://Simulation/Motorcycle/tire_patch_sampler.gd")
+const VelocityJacobianRow = preload("res://Simulation/Solver/velocity_jacobian_row.gd")
 
 ## Parameter bounds: keep every product (k_A * A_i, c_A * A_i, dt * k_i, ...) far from overflow. They are rule limits, not tuning values.
 const MAX_STIFFNESS_DENSITY: float = 1.0e10
@@ -264,7 +267,7 @@ func total_moment_world(about: Vector3) -> Vector3:
 	return moment
 
 
-## Moment the patch applies to the wheel about its centre (N m, world): sum over the active rows of the installed wheel-side angular
+## Moment the patch applies to the wheel about its centre (N m, world): sum over the active rows of the installed wheel-side IMPULSE angular
 ## Jacobian times the sample load, i.e. what the solver's angular impulse delivers (domega = I_w^-1 sum_i J_ang_i lambda_i). It equals
 ## total_moment_world(wheel.position) up to rounding because J_ang_i = r_i x n.
 func applied_wheel_moment() -> Vector3:
@@ -325,8 +328,7 @@ func _update_rows(dt: float, config) -> void:
 		_clear_state()
 		return
 	var n: Vector3 = plane_normal
-	var axle: Vector3 = (body_b.orientation * AXLE_LOCAL).normalized()
-	var spin: float = body_b.angular_velocity.dot(axle)  # start-of-step spin about the axle (frozen over the step)
+	var axle: Vector3 = (body_b.orientation * AXLE_LOCAL).normalized()  # start-of-step axle u (frozen over the step, like the Jacobians)
 	var kept: Dictionary = {}
 	var new_rows: Array = []
 	_active_index = []
@@ -346,10 +348,9 @@ func _update_rows(dt: float, config) -> void:
 		var gamma: float = coefficients["gamma"]
 		var bias: float = coefficients["bias_per_gap"] * gap
 		var bottomed: bool = -gap > max_compression
-		var spin_bias: float = -spin * axle.dot((position - body_b.position).cross(n))  # tangent tread velocity, not compression rate (see the header)
 		var split_bias: float = (config.baumgarte_factor / dt) * (gap + max_compression)
 		# A compressed sample with a non-finite derived coefficient is an invalid patch, never an inactive sample.
-		var bad: String = "gamma" if not is_finite(gamma) else ("bias" if not is_finite(bias) else ("split bias" if not is_finite(split_bias) else ("spin bias" if not is_finite(spin_bias) else "")))
+		var bad: String = "gamma" if not is_finite(gamma) else ("bias" if not is_finite(bias) else ("split bias" if not is_finite(split_bias) else ""))
 		if bad != "":
 			last_reason = "invalid derived coefficient: %s is not finite for compressed sample %d (lateral %d, angular %d; area %s m^2, stiffness %s N/m, damping %s N s/m, dt %s s)" % [
 					bad, int(s["lateral_index"]) * circumferential_count + int(s["angular_index"]), int(s["lateral_index"]), int(s["angular_index"]),
@@ -359,27 +360,30 @@ func _update_rows(dt: float, config) -> void:
 		var index: int = int(s["lateral_index"]) * circumferential_count + int(s["angular_index"])
 		var row = _rows_by_index.get(index)
 		if row == null:
-			row = ConstraintRow.new(body_a, body_b)
+			row = VelocityJacobianRow.new(body_a, body_b)
 		elif not is_finite(row.accumulated_impulse):
 			row.reset_impulses()
 		var r_a: Vector3 = position - body_a.position
 		var r_b: Vector3 = position - body_b.position
+		var moment_b: Vector3 = r_b.cross(n)  # r x n: the full moment of a normal impulse at the sample
 		row.linear_a = -n
 		row.angular_a = -r_a.cross(n)  # the ground is static: it takes no velocity change, the term only keeps the row symmetric
+		row.velocity_angular_a = row.angular_a  # static ground: nothing to project
 		row.linear_b = n
-		row.angular_b = r_b.cross(n)  # full moment of a normal impulse at the sample (see the header)
+		row.angular_b = moment_b  # IMPULSE side: the physical wrench, never projected (see the header)
+		row.velocity_angular_b = moment_b - axle * axle.dot(moment_b)  # VELOCITY side: spin about the axle is not compression
 		row.min_impulse = 0.0
 		row.max_impulse = INF
 		if bottomed:
 			row.softness = 0.0
-			row.bias = spin_bias
+			row.bias = 0.0
 			row.split_enabled = true
 			row.split_bias = split_bias
 			row.split_min_impulse = 0.0
 			row.split_max_impulse = INF
 		else:
 			row.softness = gamma
-			row.bias = bias + spin_bias
+			row.bias = bias
 			row.split_enabled = false
 		kept[index] = row
 		new_rows.append(row)
