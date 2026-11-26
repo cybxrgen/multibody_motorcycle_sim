@@ -53,6 +53,15 @@ Do not touch an unrelated document just to look comprehensive. Record the latest
 10. Documentation must never describe functionality that does not exist. Avoid dates, commit hashes, test counts and branch names outside
     the documents that own them (`PROJECT_STATE.md`, `HANDOFF.md`); a file cannot contain the hash of its own commit.
 
+### Roadmap maintenance (mandatory; `PHASE_PLAN.md` is a live plan, not a status history)
+1. When the current milestone or stage changes, update the existing current-milestone heading and description in place.
+2. Update existing milestone-table entries in place when their status changes; keep one row per milestone.
+3. Never append a new status paragraph as a substitute for correcting stale current-state information; replace the stale text.
+4. Keep the roadmap narrative `PHASE_PLAN.md` focused on the current phase, current milestone, remaining work, and next-phase objective. Retain the existing milestone table as a concise status index; do not turn it into a historical narrative.
+5. Put implementation inventories and verified technical state in `PROJECT_STATE.md`.
+6. Treat `HANDOFF.md` as a delivery snapshot of the assignment it describes, not as the authoritative live roadmap.
+7. Before committing, reconcile the current-milestone narrative, milestone table, remaining-work section and relevant state documentation.
+
 Every document starts with a short statement of what it is authoritative for, what belongs elsewhere and when to update it. Keep it.
 Record failed or rejected approaches with reasons in the owning technical document so they are not retried blindly.
 
