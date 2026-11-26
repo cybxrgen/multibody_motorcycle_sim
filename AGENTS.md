@@ -57,7 +57,7 @@ Do not touch an unrelated document just to look comprehensive. Record the latest
 1. When the current milestone or stage changes, update the existing current-milestone heading and description in place.
 2. Update existing milestone-table entries in place when their status changes; keep one row per milestone.
 3. Never append a new status paragraph as a substitute for correcting stale current-state information; replace the stale text.
-4. Keep `PHASE_PLAN.md` to the current phase, current milestone, remaining work and next-phase objective.
+4. Keep the roadmap narrative `PHASE_PLAN.md` focused on the current phase, current milestone, remaining work, and next-phase objective. Retain the existing milestone table as a concise status index; do not turn it into a historical narrative.
 5. Put implementation inventories and verified technical state in `PROJECT_STATE.md`.
 6. Treat `HANDOFF.md` as a delivery snapshot of the assignment it describes, not as the authoritative live roadmap.
 7. Before committing, reconcile the current-milestone narrative, milestone table, remaining-work section and relevant state documentation.
