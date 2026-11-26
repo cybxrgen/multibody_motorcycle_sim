@@ -62,7 +62,8 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## The effective mass uses J_vel M^-1 J_vel^T, while the exact response of the row rate to a unit impulse is J_vel M^-1 J_imp^T. They differ by
 ## J_vel_ang . I_w^-1 u (u . (r_i x n)): zero for every sample if and only if I_w^-1 u is parallel to u, i.e. u is a principal axis of the
 ## wheel inertia (equivalently I u = lambda u). SimMassProperties accepts full non-diagonal tensors, so this is NOT implied by a valid body:
-## validate() rejects a wheel whose body-frame tensor couples the axle (body-local +X) to the transverse axes (axle_principal_axis_error). The
+## validate() rejects a wheel whose body-frame tensor couples the axle (body-local +X) to the transverse axes, measured by the scale-independent
+## residual rho = |I u - u (u^T I u)| / |I u| against AXLE_PRINCIPAL_RESIDUAL_TOL (axle_principal_axis_error). The
 ## check is made in the BODY frame, where the axle is exactly (1, 0, 0) and the tensor is the stored one: the world orientation never enters
 ## (I_w u = R I_local R^T R e_x = R I_local e_x, so the property is the same in every orientation, and a world-frame test would only add the
 ## float32 rounding of R I R^T). The wheel inertia is never projected, diagonalised or repaired: a wheel that violates the precondition is
@@ -108,13 +109,22 @@ const MAX_COMPRESSION_RATIO: float = 0.5
 const UNIT_TOLERANCE: float = 1.0e-5
 ## Wheel axle in the wheel's own frame (project convention: body-local X).
 const AXLE_LOCAL: Vector3 = Vector3.RIGHT
-## Principal-axis precondition: the products of inertia that couple the axle to the transverse axes (I_xy, I_xz of the body-frame tensor,
-## symmetrised as SimMassProperties does for the stored inverse) may not exceed this fraction of the largest element of the tensor. It
-## is the symmetry tolerance of SimMassProperties (1e-5, about 84 float32 ulps), which already bounds the rounding noise of a tensor
-## assembled through general rotations (measured at most 2.2e-7 of the largest element over 75 such tensors, Tests O5, 45 times below
-## the tolerance); a genuine coupling is orders of magnitude larger. The effective-mass error that a tolerated coupling causes is of
-## the relative size coupling / axial moment (about 1e-5 or less), far below the float32 solver noise.
-const AXLE_PRINCIPAL_REL_TOL: float = 1.0e-5
+## Principal-axis precondition, scale-independent residual: with u the axle in the body frame and I the (symmetrised) body-frame inertia tensor,
+##   rho = |I u - u (u^T I u)| / |I u|   (the sine of the angle by which the inertia turns the axle away from itself),
+## which for u = (1, 0, 0) is sqrt(I_xy^2 + I_xz^2) / sqrt(I_xx^2 + I_xy^2 + I_xz^2). A wheel whose rho exceeds this tolerance is rejected.
+## Why this measure: the relative error of the row effective mass caused by a non-principal axle is of the order of rho (the error term is
+## J_vel_ang . I^-1 u (u . (r_i x n)) with I u = I_xx u + c, |c| = rho |I u|, and I^-1 u = (u - I^-1 c) / I_xx), so rho bounds it whatever the
+## ratio of axial to transverse moments; the former test compared |c| with the largest element of the tensor, which for a small axial moment and
+## large transverse moments let |c| / I_xx be as large as 1e-5 times the transverse-to-axial ratio. Measured in float64 over random sample
+## geometry (axial : transverse moments from 1000:1 to 1:1000), the relative effective-mass error at rho = 1e-4 was at most 4.4e-4.
+## Float32 level: a tensor assembled through general rotations carries rounding in I_xy, I_xz of about 1.5e-7 times the largest TRANSVERSE moment
+## (it scales with the largest element, not with I_xx), so rho is about 2.7e-7 or less for a wheel whose axial moment is the largest or
+## comparable (measured at most 2.7e-7 over 126 tensors per ratio, up to 1:10000), 1.3e-5 for a 1:100 axial-to-transverse wheel and
+## 1.5e-4 at 1:1000. 1e-4 is therefore 370 times above the roundoff of ordinary wheels and covers assembled tensors down to an axial moment of
+## roughly 1/600 of the transverse ones; a genuine coupling is orders of magnitude larger. It equals MotorcycleConfig.WHEEL_AXLE_PRINCIPAL_TOLERANCE
+## (the same residual), so a wheel accepted by the configuration is no longer refused here. A tensor so anisotropic that its assembled roundoff
+## exceeds this tolerance has an axle that float32 cannot tell from a non-principal one; give such a wheel as a diagonal tensor in the body frame.
+const AXLE_PRINCIPAL_RESIDUAL_TOL: float = 1.0e-4
 
 var geometry: TireGeometry
 var wheel_radius: float = 0.0
@@ -226,32 +236,38 @@ func validate() -> PackedStringArray:
 	return errors
 
 
-## "" when the wheel axle (AXLE_LOCAL, the body-local +X axis) is a principal axis of the body-frame inertia tensor `local_inertia`
-## (I e_x parallel to e_x, i.e. I_xy = I_xz = 0), otherwise the validation message. Pure and deterministic: the verdict and the text depend only on
-## the tensor. The tensor is compared in the body frame (never the world frame, see the header) and in float64 scalars; the coupling is
-## the symmetrised product of inertia 0.5 (I_ab + I_ba), the same symmetrisation SimMassProperties applies to the inverse it stores, and
-## the tolerance is AXLE_PRINCIPAL_REL_TOL times the largest element, so the verdict is independent of the physical scale of the tensor.
-## Element (row r, column c) of a Godot Basis is basis[c][r], so I_xy is x.y (and y.x), I_xz is x.z (and z.x). A NaN coupling fails the comparison
-## and is reported; finiteness of the whole tensor is the business of SimMassProperties.validate_inertia(), which every dynamic body has passed.
+## "" when the wheel axle (AXLE_LOCAL, the body-local +X axis) is a principal axis of the body-frame inertia tensor `local_inertia`, otherwise the
+## validation message. The criterion is the dimensionless residual rho = |I u - u (u^T I u)| / |I u| <= AXLE_PRINCIPAL_RESIDUAL_TOL (see the constant).
+## Pure and deterministic: the verdict and the text depend only on the tensor. The tensor is evaluated in the body frame (never the world frame, see the
+## header) and in float64 scalars. I u is the first column of the tensor symmetrised as SimMassProperties symmetrises the inverse it stores:
+## (I_xx, 0.5 (I_xy + I_yx), 0.5 (I_xz + I_zx)); u^T I u = I_xx, so the off-axle part of I u is the pair of products of inertia. Element (row r,
+## column c) of a Godot Basis is basis[c][r], so I_xy is x.y (and y.x), I_xz is x.z (and z.x). The tensor is never modified.
+## The three components are divided by the largest magnitude before the norms are taken, so the residual is independent of the scale of the tensor and
+## cannot overflow or underflow. A tensor that gives no usable residual (a non-finite entry, a zero I u, an axial moment I_xx <= 0) is REPORTED, never
+## accepted: no division by zero is performed and a NaN residual fails the comparison. A valid dynamic body (SimMassProperties.validate_inertia) always
+## has a finite, positive I_xx, so these branches are defensive.
 static func axle_principal_axis_error(local_inertia: Basis) -> String:
-	var scale: float = 0.0
-	for column in [local_inertia.x, local_inertia.y, local_inertia.z]:
-		scale = maxf(scale, maxf(absf(column.x), maxf(absf(column.y), absf(column.z))))
+	var axial: float = local_inertia.x.x
 	var coupling_xy: float = 0.5 * (local_inertia.x.y + local_inertia.y.x)
 	var coupling_xz: float = 0.5 * (local_inertia.x.z + local_inertia.z.x)
-	var coupling: float = sqrt(coupling_xy * coupling_xy + coupling_xz * coupling_xz)
-	var tolerance: float = AXLE_PRINCIPAL_REL_TOL * scale
-	if coupling <= tolerance:
+	var residual: float = NAN
+	if is_finite(axial) and is_finite(coupling_xy) and is_finite(coupling_xz) and axial > 0.0:
+		var largest: float = maxf(axial, maxf(absf(coupling_xy), absf(coupling_xz)))
+		var a: float = axial / largest
+		var x: float = coupling_xy / largest
+		var z: float = coupling_xz / largest
+		var off_axle: float = sqrt(x * x + z * z)
+		residual = off_axle / sqrt(a * a + off_axle * off_axle)
+	if is_finite(residual) and residual <= AXLE_PRINCIPAL_RESIDUAL_TOL:
 		return ""
 	return ("tire patch: the tyre patch normal-support model requires the wheel axle (body-local +X) to be a principal axis of the wheel inertia "
-			+ "tensor, but the tensor couples the axle to the transverse axes (products of inertia I_xy = %s, I_xz = %s kg m^2; coupling %s kg m^2 "
-			+ "exceeds the tolerance %s kg m^2 = %s of the largest tensor element). Define the wheel inertia in a body frame whose +X axis is the "
+			+ "tensor, but the tensor couples the axle to the transverse axes (axial moment I_xx = %s, products of inertia I_xy = %s, I_xz = %s kg m^2; "
+			+ "principal-axis residual |I u - u (u.I u)| / |I u| = %s exceeds the tolerance %s, a scale-independent ratio; a residual of nan means no "
+			+ "usable residual exists for this tensor). Define the wheel inertia in a body frame whose +X axis is the "
 			+ "axle principal axis (I_xy = I_xz = 0), for example a diagonal tensor with the axial moment first; the inertia is not modified here.") % [
-			coupling_xy, coupling_xz, coupling, tolerance, AXLE_PRINCIPAL_REL_TOL]
+			axial, coupling_xy, coupling_xz, residual, AXLE_PRINCIPAL_RESIDUAL_TOL]
 
 
-## Implicit spring-damper coefficients of one sample: {gamma, bias_per_gap}. gamma = 1/(dt (c + dt k)) (row softness, m/(N s^2)) and
-## bias = bias_per_gap * g with bias_per_gap = dt k gamma = k / (c + dt k) (1/s). NaN for non-finite or non-positive input.
 static func soft_coefficients(stiffness: float, damping: float, dt: float) -> Dictionary:
 	if not (is_finite(stiffness) and stiffness > 0.0 and is_finite(damping) and damping >= 0.0 and is_finite(dt) and dt > 0.0):
 		return {"gamma": NAN, "bias_per_gap": NAN}

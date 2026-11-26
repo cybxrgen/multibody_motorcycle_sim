@@ -1180,9 +1180,13 @@ func test_n_split_correction_does_not_apply_the_axle_moment_and_leaves_physical_
 ## Products of inertia of the rejected cases: 0.5 kg m^2 is 6.6 % of the axial moment and tilts the true principal axes of the axle/transverse
 ## plane by 0.5 atan(2 * 0.5 / (A - B)) = 0.139 rad (8 degrees), a physically meaningful skew (a wheel whose mass is distributed off its axle plane).
 const COUPLING: float = 0.5
-## The documented tolerance of the precondition (PHYSICS_CONVENTIONS.md): a coupling above this fraction of the largest tensor element is rejected.
-## It equals SimMassProperties' symmetry tolerance (about 84 float32 ulps). Written here as a literal so the tests do not read it from the constraint.
-const PRINCIPAL_REL_TOL: float = 1.0e-5
+## The documented tolerance of the precondition (PHYSICS_CONVENTIONS.md): the scale-independent principal-axis residual
+## rho = |I u - u (u^T I u)| / |I u| = sqrt(I_xy^2 + I_xz^2) / |I u| of the body-frame tensor may not exceed it. Written here as a literal so the
+## tests do not read it from the constraint. It equals MotorcycleConfig's axle residual tolerance (the same residual).
+const PRINCIPAL_RESIDUAL_TOL: float = 1.0e-4
+## The tolerance of the REPLACED criterion (coupling <= this fraction of the largest tensor element), kept only so the regression test can show that
+## the old criterion accepted its tensor.
+const LEGACY_LARGEST_ELEMENT_REL_TOL: float = 1.0e-5
 
 
 ## The fixture wheel's tensor with the products of inertia I_xy, I_xz (axle coupling) and I_yz (transverse coupling) added. Symmetric by construction.
@@ -1210,6 +1214,24 @@ func accepted(tensor: Basis) -> bool:
 
 func max_off_diagonal(m: Basis) -> float:
 	return maxf(maxf(absf(m.x.y), absf(m.x.z)), absf(m.y.z))
+
+
+## The principal-axis residual of a body-frame tensor, computed in this file from the symmetrised first column I u = (I_xx, I_xy, I_xz) (u = +X).
+func axle_residual(m: Basis) -> float:
+	var xy: float = 0.5 * (m.x.y + m.y.x)
+	var xz: float = 0.5 * (m.x.z + m.z.x)
+	var coupling: float = sqrt(xy * xy + xz * xz)
+	return coupling / sqrt(m.x.x * m.x.x + coupling * coupling)
+
+
+## The REPLACED criterion, reproduced from the previous implementation: the symmetrised axle coupling against 1e-5 of the largest tensor element.
+func legacy_largest_element_accepts(m: Basis) -> bool:
+	var largest: float = 0.0
+	for column in [m.x, m.y, m.z]:
+		largest = maxf(largest, maxf(absf(column.x), maxf(absf(column.y), absf(column.z))))
+	var xy: float = 0.5 * (m.x.y + m.y.x)
+	var xz: float = 0.5 * (m.x.z + m.z.x)
+	return sqrt(xy * xy + xz * xz) <= LEGACY_LARGEST_ELEMENT_REL_TOL * largest
 
 
 ## O1. A wheel whose axle is a principal axis stays valid: the diagonal fixture wheel, other diagonal and isotropic tensors, with the full lifecycle.
@@ -1333,12 +1355,18 @@ func test_o_validation_result_and_message_are_deterministic() -> void:
 		check(r == first, "validate() of one patch is not repeatable")
 	# Everything below reads the message; a missing one is already a failure above and must not become a script error.
 	var message: String = first[0] if first.size() == 1 else ""
-	# The message names the measured products of inertia (the tensor holds them exactly, x.y == y.x) and the rule that was applied.
-	var scale: float = tensor.x.x  # the largest element of this tensor
-	var coupling: float = sqrt(tensor.x.y * tensor.x.y + tensor.x.z * tensor.x.z)
-	check(message.contains("I_xy = %s, I_xz = %s kg m^2" % [tensor.x.y, tensor.x.z]), "the message must report the products of inertia: %s" % message)
-	check(message.contains("coupling %s kg m^2 exceeds the tolerance %s kg m^2" % [coupling, PRINCIPAL_REL_TOL * scale]),
-			"the message must report the coupling and the tolerance: %s" % message)
+	# The message names the measured axial moment and products of inertia (the tensor holds them exactly, x.y == y.x), the residual and the tolerance.
+	var residual: float = axle_residual(tensor)
+	check(message.contains("I_xx = %s, products of inertia I_xy = %s, I_xz = %s kg m^2" % [tensor.x.x, tensor.x.y, tensor.x.z]), "the message must report the axial moment and the products of inertia: %s" % message)
+	# The residual is parsed from the text and compared numerically (the printed digits depend on the order of the float64 operations, not on the value).
+	var label: String = "residual |I u - u (u.I u)| / |I u| = "
+	var start: int = message.find(label)
+	var end: int = message.find(" exceeds the tolerance %s" % PRINCIPAL_RESIDUAL_TOL)
+	check(start >= 0 and end > start, "the message must report the residual and the tolerance: %s" % message)
+	if start >= 0 and end > start:
+		var reported: float = message.substr(start + label.length(), end - start - label.length()).to_float()
+		check(absf(reported - residual) <= 1.0e-9 * residual, "the reported residual %s differs from the independent residual %s" % [reported, residual])
+	check(message.contains("scale-independent"), "the message must say that the tolerance is a scale-independent ratio: %s" % message)
 	# A different coupling gives a different message, an equal one an equal message.
 	var other: PackedStringArray = unchecked_support(make_static(), wheel_with(coupled_inertia(0.3, 0.2))).validate()
 	check(other.size() == 1 and message != "" and other[0] != message, "the message must depend on the coupling")
@@ -1369,13 +1397,13 @@ func test_o_roundoff_is_accepted_and_the_tolerance_is_scale_independent() -> voi
 					nonzero += 1
 				check(accepted(tensor), "roundoff of an assembled principal tensor was rejected (scale %s, axis %s, angle %s, relative coupling %s)" % [scale, axis, angle, relative])
 	check(nonzero == cases, "fixture error: every assembled tensor must carry some float32 roundoff in I_xy / I_xz (%d of %d do)" % [nonzero, cases])
-	check(worst < 0.1 * PRINCIPAL_REL_TOL, "the roundoff of the assembled tensors (%s) is not far below the tolerance" % worst)
+	check(worst < 0.1 * PRINCIPAL_RESIDUAL_TOL, "the roundoff of the assembled tensors (%s) is not far below the tolerance" % worst)
 	# The tolerance boundary: half the tolerance passes, twice the tolerance fails, for both products of inertia, both signs and every scale.
 	for scale in [1.0e-3, 1.0, 1.0e4]:
 		var base: Vector3 = Vector3(0.6, 0.3, 0.3) * scale
 		var largest: float = 0.6 * scale
-		var inside: float = 0.5 * PRINCIPAL_REL_TOL * largest
-		var outside: float = 2.0 * PRINCIPAL_REL_TOL * largest
+		var inside: float = 0.5 * PRINCIPAL_RESIDUAL_TOL * largest
+		var outside: float = 2.0 * PRINCIPAL_RESIDUAL_TOL * largest
 		for direction in [1.0, -1.0]:
 			var in_xy: Basis = Basis(Vector3(base.x, direction * inside, 0.0), Vector3(direction * inside, base.y, 0.0), Vector3(0.0, 0.0, base.z))
 			var in_xz: Basis = Basis(Vector3(base.x, 0.0, direction * inside), Vector3(0.0, base.y, 0.0), Vector3(direction * inside, 0.0, base.z))
@@ -1453,6 +1481,101 @@ func test_o_existing_invalid_body_and_constraint_validation_is_intact() -> void:
 	check(unchecked_support(dynamic_ground, wheel_with(MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W))).validate() == PackedStringArray(["tire patch: the ground body must be static"]),
 			"a dynamic ground must keep its message")
 	check(try_create({}) != null and try_create({}).validate().is_empty(), "the reference patch must stay valid")
+
+
+## O8. PR #21 review finding (P2): a high-anisotropy wheel. The axial principal moment is small and the transverse moments are 1000 times larger, with a
+## product of inertia between the axle and the transverse axes. The REPLACED criterion compared that coupling with 1e-5 of the LARGEST tensor element (a
+## transverse moment) and accepted it although the inertia turns the axle by a residual rho = 5e-3 (50 times the tolerance); the scale-independent
+## residual rejects it. Values (kg m^2): I_xx = 1, I_yy = 1000, I_zz = 1000.5 (triangle inequality kept, rcond 1e-3 far above its 1e-5 limit), I_xy = 0.004,
+## I_xz = -0.003 (coupling 0.005, a 3-4-5 pair). Separations: the old tolerance was 0.010005, twice the coupling; rho = 4.99994e-3 against 1e-4. Both
+## margins are clear (a factor of 2 and a factor of 50). The float32 roundoff of an assembled tensor this anisotropic is about 1.5e-4 of rho (measured, see the
+## constant in the constraint), 33 times below this tensor's residual; the tensor here is given directly, so no roundoff enters.
+func test_o_high_anisotropy_wheel_with_a_small_axial_moment_is_rejected_by_the_residual() -> void:
+	var tensor: Basis = Basis(Vector3(1.0, 0.004, -0.003), Vector3(0.004, 1000.0, 0.0), Vector3(-0.003, 0.0, 1000.5))
+	var label: String = "high anisotropy"
+	# 1. The tensor is a valid inertia on its own and the body is an ordinary valid dynamic body.
+	check(SimMassProperties.validate_inertia(tensor) == "", "%s: the tensor must pass SimMassProperties.validate_inertia() on its own" % label)
+	var props: SimMassProperties = SimMassProperties.new(100.0, tensor)
+	check(props.valid and not props.is_static(), "%s: fixture error: the mass properties must be valid and dynamic (%s)" % [label, props.error_message])
+	check(tensor.x.y == tensor.y.x and tensor.x.z == tensor.z.x and tensor.y.z == tensor.z.y, "%s: fixture error: the tensor must be exactly symmetric" % label)
+	check(tensor.x.x < 0.002 * minf(tensor.y.y, tensor.z.z), "%s: fixture error: the axial moment must be small against the transverse moments" % label)
+	check(tensor.x.y != 0.0 and tensor.x.z != 0.0, "%s: fixture error: the axle-to-transverse products of inertia must be nonzero" % label)
+	# 2. Materially non-principal under the residual criterion: far above the tolerance (50 times) and far from any float32 roundoff.
+	var residual: float = axle_residual(tensor)
+	check(residual > 40.0 * PRINCIPAL_RESIDUAL_TOL and residual < 60.0 * PRINCIPAL_RESIDUAL_TOL, "%s: fixture error: the residual must be about 50 times the tolerance (got %s)" % [label, residual])
+	# 3. The replaced criterion accepts it, so this test covers exactly the review finding: the coupling is half the old tolerance (largest element 1000.5).
+	var coupling: float = sqrt(tensor.x.y * tensor.x.y + tensor.x.z * tensor.x.z)
+	check(legacy_largest_element_accepts(tensor), "%s: the replaced largest-element criterion must accept this tensor (that is the defect)" % label)
+	check(LEGACY_LARGEST_ELEMENT_REL_TOL * 1000.5 > 1.9 * coupling, "%s: fixture error: the old criterion must accept with a clear margin" % label)
+	# The control: the same anisotropy without the coupling is a principal wheel and is accepted (the rejection is the coupling, not the anisotropy).
+	var principal: Basis = Basis.from_scale(Vector3(1.0, 1000.0, 1000.5))
+	check(SimMassProperties.validate_inertia(principal) == "" and accepted(principal), "%s: the diagonal tensor of the same anisotropy must be accepted" % label)
+	# 4. validate() rejects it with the principal-axis error, and only with that error.
+	var wheel: SimRigidBody = wheel_with(tensor)
+	var ground: SimRigidBody = make_static()
+	var support = unchecked_support(ground, wheel)
+	var errors: PackedStringArray = support.validate()
+	check(errors.size() == 1, "%s: exactly one error expected, got %d: %s" % [label, errors.size(), "; ".join(errors)])
+	check(not support.is_valid(), "%s: is_valid() must be false" % label)
+	if errors.size() == 1:
+		for phrase in ["tire patch:", "normal-support model requires", "wheel axle (body-local +X)", "principal axis", "I_xy =", "I_xz =", "residual", "Define the wheel inertia"]:
+			check(errors[0].contains(phrase), "%s: the message lacks '%s': %s" % [label, phrase, errors[0]])
+	# 5. create() refuses it, and SimWorld refuses the patch at registration.
+	check(try_create({"wheel": wheel}) == null, "%s: create() accepted a non-principal-axis wheel" % label)
+	var w: SimWorld = make_world()
+	w.add_body(ground)
+	w.add_body(wheel)
+	check(w.add_constraint(support) == null and w.constraints.is_empty(), "%s: SimWorld registered a non-principal-axis patch" % label)
+	# 6. Nothing was corrected or projected: the tensor and its inverse are exactly the ones given.
+	check_basis_near(wheel.local_inertia, tensor, 0.0, "%s: the wheel inertia was modified" % label)
+	check_basis_near(wheel.inverse_local_inertia, props.inverse_local_inertia, 0.0, "%s: the wheel inverse inertia was modified" % label)
+	# The verdict is the same at other physical scales (the ratio is scale-free), while the old criterion also accepted every one of them.
+	for factor in [1.0e-6, 1.0e6]:
+		var scaled: Basis = tensor * factor
+		check(SimMassProperties.validate_inertia(scaled) == "", "%s: fixture error: the scaled tensor (x%s) must be a valid inertia" % [label, factor])
+		check(legacy_largest_element_accepts(scaled), "%s: the replaced criterion must accept the scaled tensor too (x%s)" % [label, factor])
+		check(not accepted(scaled), "%s: the scaled tensor (x%s) must be rejected" % [label, factor])
+		check(accepted(principal * factor), "%s: the scaled diagonal control (x%s) must be accepted" % [label, factor])
+
+
+## O9. The residual is relative to the axial row, so the same coupling is harmless next to a LARGE axial moment, and tensors that give no usable residual are
+## reported rather than accepted (the static function is read directly: a non-finite or zero tensor cannot belong to a valid body).
+func test_o_the_residual_is_relative_to_the_axial_row_and_unusable_tensors_are_reported() -> void:
+	# The same absolute coupling (0.005) next to a large axial moment: rho = 5e-6, twenty times below the tolerance, accepted by both criteria.
+	var large_axial: Basis = Basis(Vector3(1000.0, 0.004, -0.003), Vector3(0.004, 1.0, 0.0), Vector3(-0.003, 0.0, 1.0))
+	check(SimMassProperties.validate_inertia(large_axial) == "", "fixture error: the large-axial tensor must be a valid inertia")
+	check(axle_residual(large_axial) < 0.1 * PRINCIPAL_RESIDUAL_TOL, "fixture error: the large-axial residual must be far below the tolerance (got %s)" % axle_residual(large_axial))
+	check(accepted(large_axial), "a coupling that is tiny against the axial moment must be accepted")
+	# Unusable tensors: every one returns a message (never "", never a script error), with a nan residual where no residual exists.
+	var nan_value: float = NAN
+	var inf_value: float = INF
+	var unusable: Array = [
+		["NaN axial moment", Basis(Vector3(nan_value, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))],
+		["NaN product of inertia", Basis(Vector3(1.0, nan_value, 0.0), Vector3(nan_value, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))],
+		["infinite product of inertia", Basis(Vector3(1.0, 0.0, inf_value), Vector3(0.0, 1.0, 0.0), Vector3(inf_value, 0.0, 1.0))],
+		["infinite axial moment", Basis(Vector3(inf_value, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))],
+		["zero tensor (I u = 0)", Basis(Vector3.ZERO, Vector3.ZERO, Vector3.ZERO)],
+		["zero axial moment, zero couplings", Basis(Vector3(0.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))],
+		["zero axial moment with coupling", Basis(Vector3(0.0, 0.5, 0.0), Vector3(0.5, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))],
+		["negative axial moment, zero couplings", Basis(Vector3(-1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))],
+	]
+	for c in unusable:
+		var message: String = TirePatchNormalSupport.axle_principal_axis_error(c[1])
+		check(message != "", "%s: an unusable tensor was accepted" % c[0])
+		check(message.contains("principal axis") and message.contains("Define the wheel inertia"), "%s: the message must stay actionable: %s" % [c[0], message])
+	# A tensor with a usable residual keeps reporting a number, and the principal controls are accepted with an empty message.
+	check(TirePatchNormalSupport.axle_principal_axis_error(Basis.from_scale(Vector3(1.0, 1000.0, 1000.5))) == "", "a diagonal tensor must give an empty message")
+	check(TirePatchNormalSupport.axle_principal_axis_error(Basis.from_scale(Vector3(1.0e-30, 1.0e-27, 1.0e-27))) == "", "a tiny diagonal tensor must give an empty message")
+	check(TirePatchNormalSupport.axle_principal_axis_error(Basis.from_scale(Vector3(1.0e30, 1.0e33, 1.0e33))) == "", "a huge diagonal tensor must give an empty message")
+	# Tolerance boundary of the new residual itself, in the high-anisotropy regime: rho at half the tolerance passes, at twice the tolerance fails.
+	for direction in [1.0, -1.0]:
+		var axial: float = 1.0
+		var inside: float = 0.5 * PRINCIPAL_RESIDUAL_TOL * axial
+		var outside: float = 2.0 * PRINCIPAL_RESIDUAL_TOL * axial
+		var t_in: Basis = Basis(Vector3(axial, direction * inside, 0.0), Vector3(direction * inside, 1000.0, 0.0), Vector3(0.0, 0.0, 1000.0))
+		var t_out: Basis = Basis(Vector3(axial, 0.0, direction * outside), Vector3(0.0, 1000.0, 0.0), Vector3(direction * outside, 0.0, 1000.0))
+		check(accepted(t_in), "a residual at half the tolerance was rejected (high anisotropy, direction %s)" % direction)
+		check(not accepted(t_out), "a residual at twice the tolerance was accepted (high anisotropy, direction %s)" % direction)
 
 
 # ---------------------------------------------------------------- M: determinism
