@@ -1167,6 +1167,294 @@ func test_n_split_correction_does_not_apply_the_axle_moment_and_leaves_physical_
 	check_vec3_near(wheel.angular_velocity, angular0, 0.0, "the split pass changed the physical angular velocity")
 
 
+# ---------------------------------------------------------------- O: principal-axis precondition
+##
+## The velocity-side effective mass J_v M^-1 J_v^T equals the exact response J_v M^-1 J_i^T only if the wheel axle u (body-local +X) is a principal
+## axis of the wheel inertia, which SimMassProperties does not imply (it accepts full tensors). validate() therefore rejects a wheel whose BODY-FRAME
+## tensor couples the axle to the transverse axes (I_xy, I_xz). The tests establish: the accepted and the rejected tensors are valid inertias on
+## their own (SimMassProperties.validate_inertia), the verdict depends on the body-frame tensor and never on the world orientation (a rotated principal
+## wheel is accepted although its WORLD tensor is non-diagonal; a non-principal wheel posed so that its WORLD tensor is diagonal is rejected), float32
+## roundoff of an assembled principal tensor is not rejected, the check runs in SimWorld's ordinary registration and preflight lifecycle, and nothing is
+## repaired, projected or skipped. Wheel of the fixture: m = 100 kg, axial moment A = 7.53 and transverse moments B = 4.02 kg m^2 (MotorcycleConfig.wheel_inertia).
+
+## Products of inertia of the rejected cases: 0.5 kg m^2 is 6.6 % of the axial moment and tilts the true principal axes of the axle/transverse
+## plane by 0.5 atan(2 * 0.5 / (A - B)) = 0.139 rad (8 degrees), a physically meaningful skew (a wheel whose mass is distributed off its axle plane).
+const COUPLING: float = 0.5
+## The documented tolerance of the precondition (PHYSICS_CONVENTIONS.md): a coupling above this fraction of the largest tensor element is rejected.
+## It equals SimMassProperties' symmetry tolerance (about 84 float32 ulps). Written here as a literal so the tests do not read it from the constraint.
+const PRINCIPAL_REL_TOL: float = 1.0e-5
+
+
+## The fixture wheel's tensor with the products of inertia I_xy, I_xz (axle coupling) and I_yz (transverse coupling) added. Symmetric by construction.
+func coupled_inertia(xy: float, xz: float, yz: float = 0.0) -> Basis:
+	var diagonal: Basis = MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W)
+	var a: float = diagonal.x.x
+	var b: float = diagonal.y.y
+	var c: float = diagonal.z.z
+	return Basis(Vector3(a, xy, xz), Vector3(xy, b, yz), Vector3(xz, yz, c))
+
+
+func wheel_with(inertia: Basis, orientation: Quaternion = Quaternion.IDENTITY) -> SimRigidBody:
+	return make_body(100.0, inertia, Vector3(0.0, R, 0.0), orientation)
+
+
+## The patch exactly as create() would build it but WITHOUT the validation gate, so validate() can be read for a wheel that create() refuses.
+func unchecked_support(ground: SimRigidBody, wheel: SimRigidBody):
+	return TirePatchNormalSupport.new(ground, wheel, geo(), R, Vector3.ZERO, Vector3.UP, K_A, C_A, D_MAX, 9, 48)
+
+
+## True when validate() of a patch on a wheel with this body-frame tensor reports no error (the only public route; no private helper is read).
+func accepted(tensor: Basis) -> bool:
+	return unchecked_support(make_static(), wheel_with(tensor)).validate().is_empty()
+
+
+func max_off_diagonal(m: Basis) -> float:
+	return maxf(maxf(absf(m.x.y), absf(m.x.z)), absf(m.y.z))
+
+
+## O1. A wheel whose axle is a principal axis stays valid: the diagonal fixture wheel, other diagonal and isotropic tensors, with the full lifecycle.
+func test_o_a_diagonal_wheel_with_the_axle_principal_axis_stays_valid() -> void:
+	var diagonal: Basis = MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W)
+	check(diagonal.x.y == 0.0 and diagonal.x.z == 0.0 and diagonal.y.z == 0.0, "fixture error: the reference wheel tensor must be exactly diagonal")
+	var tensors: Array = [
+		["fixture wheel (axial > transverse)", diagonal],
+		["axial < transverse", LIGHT_INERTIA],
+		["three distinct principal moments", Basis.from_scale(Vector3(5.0, 3.0, 4.0))],
+		["isotropic (every axis principal)", SimMassProperties.sphere_inertia(100.0, R)],
+	]
+	for t in tensors:
+		var tensor: Basis = t[1]
+		check(SimMassProperties.validate_inertia(tensor) == "", "fixture error: %s must be a valid inertia" % t[0])
+		var wheel: SimRigidBody = wheel_with(tensor)
+		var support = unchecked_support(make_static(), wheel)
+		check(support.validate().is_empty(), "%s: a principal-axis wheel was reported invalid: %s" % [t[0], "; ".join(support.validate())])
+		check(try_create({"wheel": wheel}) != null, "%s: create() refused a principal-axis wheel" % t[0])
+	# The whole lifecycle with the reference wheel: registered, preflight passes, the patch supports the wheel.
+	var rig: Dictionary = make_rig({"height": R - DELTA})
+	check(rig["support"].is_valid(), "the reference patch must be valid")
+	check(rig["world"].constraints.size() == 1 and rig["world"].constraints[0] == rig["support"], "fixture error: the patch must be registered in the world")
+	check(rig["world"].preflight(), "preflight must accept the reference patch (%s)" % rig["world"].last_error)
+	check(rig["world"].step(), "the reference world must step")
+	check(rig["support"].contact_active and rig["support"].normal_load() > 0.0, "a valid patch must support the compressed wheel")
+
+
+## O2. A valid, non-diagonal tensor whose axle is NOT a principal axis is rejected: a physically meaningful product of inertia on the axle row.
+func test_o_a_non_principal_axle_with_a_valid_non_diagonal_tensor_is_rejected() -> void:
+	var cases: Array = [
+		["I_xy only", coupled_inertia(COUPLING, 0.0)],
+		["I_xz only (negative)", coupled_inertia(0.0, -COUPLING)],
+		["I_xy and I_xz", coupled_inertia(0.3, 0.4)],
+		["I_xy with a transverse I_yz", coupled_inertia(COUPLING, 0.0, 0.2)],
+	]
+	for c in cases:
+		var tensor: Basis = c[1]
+		var label: String = c[0]
+		# The tensor is a valid inertia on its own and the body is an ordinary valid dynamic body: only the axle condition is at fault.
+		check(SimMassProperties.validate_inertia(tensor) == "", "%s: fixture error: the tensor must pass validate_inertia() on its own" % label)
+		var props: SimMassProperties = SimMassProperties.new(100.0, tensor)
+		check(props.valid and not props.is_static(), "%s: fixture error: the mass properties must be valid and dynamic (%s)" % [label, props.error_message])
+		check(max_off_diagonal(tensor) >= 0.2, "%s: fixture error: the coupling must be physically meaningful" % label)
+		var wheel: SimRigidBody = wheel_with(tensor)
+		var ground: SimRigidBody = make_static()
+		var support = unchecked_support(ground, wheel)
+		var errors: PackedStringArray = support.validate()
+		check(errors.size() == 1, "%s: exactly one error expected, got %d: %s" % [label, errors.size(), "; ".join(errors)])
+		check(not support.is_valid(), "%s: is_valid() must be false" % label)
+		if errors.size() >= 1:
+			for phrase in ["tire patch:", "normal-support model requires", "wheel axle (body-local +X)", "principal axis", "I_xy =", "I_xz =", "Define the wheel inertia"]:
+				check(errors[0].contains(phrase), "%s: the message lacks '%s': %s" % [label, phrase, errors[0]])
+		check(try_create({"wheel": wheel}) == null, "%s: create() accepted a non-principal-axis wheel" % label)
+		# SimWorld refuses it at registration (both bodies registered, so the refusal can only be the validation), and accepts the principal control.
+		var w: SimWorld = make_world()
+		w.add_body(ground)
+		w.add_body(wheel)
+		check(w.add_constraint(unchecked_support(ground, wheel)) == null, "%s: SimWorld registered a non-principal-axis patch" % label)
+		check(w.constraints.is_empty(), "%s: the refused constraint is in the world" % label)
+		var control_wheel: SimRigidBody = wheel_with(MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W))
+		var cw: SimWorld = make_world()
+		var cground: SimRigidBody = make_static()
+		cw.add_body(cground)
+		cw.add_body(control_wheel)
+		check(cw.add_constraint(unchecked_support(cground, control_wheel)) != null, "%s: control error: the principal-axis control must register" % label)
+		# Nothing was repaired: the wheel keeps exactly the tensor it was given (and its inverse).
+		check_basis_near(wheel.local_inertia, tensor, 0.0, "%s: the wheel inertia was modified" % label)
+		check_basis_near(wheel.inverse_local_inertia, props.inverse_local_inertia, 0.0, "%s: the wheel inverse inertia was modified" % label)
+
+
+## O3. A rotated body whose axle remains a principal axis is accepted, and the verdict follows the body-frame tensor, not the world orientation.
+func test_o_the_verdict_follows_the_body_frame_tensor_not_the_world_orientation() -> void:
+	var diagonal: Basis = MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W)
+	var yaw_camber: Quaternion = Quaternion(Vector3.UP, 0.9) * Quaternion(Vector3(0.0, 0.0, 1.0), 0.3)
+	var tilted: Quaternion = Quaternion(Vector3(1.0, 2.0, 0.5).normalized(), 1.1)
+	# (a) a diagonal body-frame tensor in rotated bodies: the WORLD tensor R I R^T is non-diagonal, the axle is still principal, accepted.
+	for q in [yaw_camber, tilted]:
+		var wheel: SimRigidBody = wheel_with(diagonal, q)
+		var u: Vector3 = q * Vector3.RIGHT
+		check(max_off_diagonal(wheel.inertia_world) > 0.5, "fixture error: the world tensor of the rotated wheel must be clearly non-diagonal (got %s)" % max_off_diagonal(wheel.inertia_world))
+		check((wheel.inertia_world * u).cross(u).length() < 1.0e-5 * diagonal.x.x, "fixture error: the world axle must still be a principal axis of the world tensor")
+		check(unchecked_support(make_static(), wheel).validate().is_empty(), "a rotated wheel with a principal axle was rejected (orientation %s)" % q)
+	# (b) a NON-DIAGONAL body-frame tensor whose axle is principal: the transverse axes are rotated about the axle inside the body frame (I_yz != 0,
+	# I_xy = I_xz = 0 up to float32 rounding). Valid, accepted in every orientation.
+	var spin_about_axle: Basis = Basis(Vector3.RIGHT, 0.6)
+	var skewed_transverse: Basis = spin_about_axle * Basis.from_scale(Vector3(7.5, 5.0, 3.0)) * spin_about_axle.transposed()
+	check(absf(skewed_transverse.y.z) > 0.5, "fixture error: the body-frame tensor must have a clear transverse product of inertia (got %s)" % skewed_transverse.y.z)
+	check(SimMassProperties.validate_inertia(skewed_transverse) == "", "fixture error: the skewed-transverse tensor must be a valid inertia")
+	check_vec3_near(skewed_transverse * Vector3.RIGHT, Vector3(7.5, 0.0, 0.0), 1.0e-5, "fixture error: the axle must be a principal axis of the skewed tensor")
+	for q in [Quaternion.IDENTITY, yaw_camber, tilted]:
+		var wheel_skewed: SimRigidBody = wheel_with(skewed_transverse, q)
+		check(unchecked_support(make_static(), wheel_skewed).validate().is_empty(), "a non-diagonal tensor with a principal axle was rejected (orientation %s)" % q)
+	# (c) the trap: a NON-principal body-frame tensor posed so that its WORLD tensor is exactly diagonal. A world-frame "is the tensor diagonal"
+	# test would accept it; the axle is not principal and it must be rejected. T = V D V^T with V = Rz(phi); the body orientation R = V^T gives R T R^T = D.
+	var tensor: Basis = coupled_inertia(COUPLING, 0.0)
+	var phi: float = 0.5 * atan2(2.0 * COUPLING, tensor.x.x - tensor.y.y)
+	var trap_orientation: Quaternion = Quaternion(Vector3(0.0, 0.0, 1.0), -phi)
+	var trap: SimRigidBody = wheel_with(tensor, trap_orientation)
+	check(max_off_diagonal(trap.inertia_world) < 5.0e-5, "fixture error: the world tensor of the trap wheel must be diagonal (got %s)" % max_off_diagonal(trap.inertia_world))
+	var u_trap: Vector3 = trap_orientation * Vector3.RIGHT
+	check((trap.inertia_world * u_trap).cross(u_trap).length() > 0.1, "fixture error: the axle of the trap wheel must NOT be a principal axis")
+	var trap_errors: PackedStringArray = unchecked_support(make_static(), trap).validate()
+	check(trap_errors.size() == 1, "a non-principal wheel whose world tensor is diagonal must be rejected (got %d errors)" % trap_errors.size())
+	# (d) the verdict and the message of one non-principal tensor are the same in every orientation.
+	var reference: PackedStringArray = unchecked_support(make_static(), wheel_with(tensor)).validate()
+	for q in [yaw_camber, tilted, trap_orientation]:
+		check(unchecked_support(make_static(), wheel_with(tensor, q)).validate() == reference, "the verdict or message depends on the world orientation (%s)" % q)
+
+
+## O4. The validation result and message are deterministic, and carry the measured couplings.
+func test_o_validation_result_and_message_are_deterministic() -> void:
+	var tensor: Basis = coupled_inertia(COUPLING, 0.2)
+	var first: PackedStringArray = unchecked_support(make_static(), wheel_with(tensor)).validate()
+	var support = unchecked_support(make_static(), wheel_with(tensor))
+	var repeated: Array = []
+	for i in 5:
+		repeated.append(support.validate())
+	check(first.size() == 1, "exactly one error expected (got %d)" % first.size())
+	for r in repeated:
+		check(r == first, "validate() of one patch is not repeatable")
+	# Everything below reads the message; a missing one is already a failure above and must not become a script error.
+	var message: String = first[0] if first.size() == 1 else ""
+	# The message names the measured products of inertia (the tensor holds them exactly, x.y == y.x) and the rule that was applied.
+	var scale: float = tensor.x.x  # the largest element of this tensor
+	var coupling: float = sqrt(tensor.x.y * tensor.x.y + tensor.x.z * tensor.x.z)
+	check(message.contains("I_xy = %s, I_xz = %s kg m^2" % [tensor.x.y, tensor.x.z]), "the message must report the products of inertia: %s" % message)
+	check(message.contains("coupling %s kg m^2 exceeds the tolerance %s kg m^2" % [coupling, PRINCIPAL_REL_TOL * scale]),
+			"the message must report the coupling and the tolerance: %s" % message)
+	# A different coupling gives a different message, an equal one an equal message.
+	var other: PackedStringArray = unchecked_support(make_static(), wheel_with(coupled_inertia(0.3, 0.2))).validate()
+	check(other.size() == 1 and message != "" and other[0] != message, "the message must depend on the coupling")
+	var equal: PackedStringArray = unchecked_support(make_static(), wheel_with(coupled_inertia(COUPLING, 0.2))).validate()
+	check(equal == first, "equal tensors must give equal results")
+
+
+## O5. Float32 roundoff of an assembled principal tensor is not rejected, a coupling just inside the tolerance passes and one just outside fails, at every
+## physical scale. The roundoff tensors are assembled through GENERAL rotations, T = Q^T (Q D Q^T) Q, which is mathematically diag(D) but numerically carries
+## float32 products of inertia: measured over the 75 cases below, the symmetrised I_xy / I_xz are nonzero in every case and at most 2.2e-7 of the largest
+## element (about two float32 epsilons), 45 times below the tolerance. (A rotation about the axle alone would not do: its first row and column are exactly
+## (1, 0, 0), so I_xy = I_xz = 0 with no rounding at all and the test would be vacuous; such tensors are covered by O3 (b).)
+func test_o_roundoff_is_accepted_and_the_tolerance_is_scale_independent() -> void:
+	var worst: float = 0.0
+	var nonzero: int = 0
+	var cases: int = 0
+	for scale in [1.0e-3, 1.0, 1.0e4]:
+		for axis in [Vector3(1.0, 2.0, 3.0), Vector3(-2.0, 1.0, 0.5), Vector3(0.3, -1.0, 2.0), Vector3(1.0, 1.0, 1.0), Vector3(0.0, 3.0, -1.0)]:
+			for angle in [0.3, 0.7, 1.3, 2.1, 2.9]:
+				var q: Basis = Basis(axis.normalized(), angle)
+				var principal: Basis = Basis.from_scale(Vector3(7.5, 5.0, 3.0) * scale)
+				var tensor: Basis = q.transposed() * (q * principal * q.transposed()) * q
+				check(SimMassProperties.validate_inertia(tensor) == "", "fixture error: the assembled tensor must be a valid inertia (scale %s, axis %s, angle %s)" % [scale, axis, angle])
+				var relative: float = 0.5 * sqrt(pow(tensor.x.y + tensor.y.x, 2) + pow(tensor.x.z + tensor.z.x, 2)) / (7.5 * scale)
+				worst = maxf(worst, relative)
+				cases += 1
+				if relative > 0.0:
+					nonzero += 1
+				check(accepted(tensor), "roundoff of an assembled principal tensor was rejected (scale %s, axis %s, angle %s, relative coupling %s)" % [scale, axis, angle, relative])
+	check(nonzero == cases, "fixture error: every assembled tensor must carry some float32 roundoff in I_xy / I_xz (%d of %d do)" % [nonzero, cases])
+	check(worst < 0.1 * PRINCIPAL_REL_TOL, "the roundoff of the assembled tensors (%s) is not far below the tolerance" % worst)
+	# The tolerance boundary: half the tolerance passes, twice the tolerance fails, for both products of inertia, both signs and every scale.
+	for scale in [1.0e-3, 1.0, 1.0e4]:
+		var base: Vector3 = Vector3(0.6, 0.3, 0.3) * scale
+		var largest: float = 0.6 * scale
+		var inside: float = 0.5 * PRINCIPAL_REL_TOL * largest
+		var outside: float = 2.0 * PRINCIPAL_REL_TOL * largest
+		for direction in [1.0, -1.0]:
+			var in_xy: Basis = Basis(Vector3(base.x, direction * inside, 0.0), Vector3(direction * inside, base.y, 0.0), Vector3(0.0, 0.0, base.z))
+			var in_xz: Basis = Basis(Vector3(base.x, 0.0, direction * inside), Vector3(0.0, base.y, 0.0), Vector3(direction * inside, 0.0, base.z))
+			var out_xy: Basis = Basis(Vector3(base.x, direction * outside, 0.0), Vector3(direction * outside, base.y, 0.0), Vector3(0.0, 0.0, base.z))
+			var out_xz: Basis = Basis(Vector3(base.x, 0.0, direction * outside), Vector3(0.0, base.y, 0.0), Vector3(direction * outside, 0.0, base.z))
+			check(accepted(in_xy) and accepted(in_xz), "a coupling at half the tolerance was rejected (scale %s)" % scale)
+			check(not accepted(out_xy) and not accepted(out_xz), "a coupling at twice the tolerance was accepted (scale %s)" % scale)
+
+
+## O6. The check belongs to the ordinary constraint validation lifecycle: a wheel whose mass properties are replaced AFTER registration is refused by
+## preflight() and step() with no state change, nothing is repaired or skipped, and stepping resumes when the wheel is valid again.
+func test_o_the_check_runs_in_the_preflight_lifecycle_and_nothing_is_repaired_or_skipped() -> void:
+	var rig: Dictionary = make_rig({"height": R - DELTA})
+	var w: SimWorld = rig["world"]
+	var wheel: SimRigidBody = rig["wheel"]
+	var support = rig["support"]
+	check(w.step() and w.step(), "fixture error: the valid world must step")
+	check(support.carried_impulse_total() > 0.0, "fixture error: the patch must carry a warm-start impulse")
+	var good: SimMassProperties = wheel.mass_properties
+	var tensor: Basis = coupled_inertia(COUPLING, 0.0)
+	check(wheel.set_mass_properties(SimMassProperties.new(100.0, tensor)), "fixture error: the body must accept the valid non-principal mass properties")
+	var position: Vector3 = wheel.position
+	var orientation: Quaternion = wheel.orientation
+	var linear: Vector3 = wheel.linear_velocity
+	var angular: Vector3 = wheel.angular_velocity
+	var steps: int = w.step_count
+	var carried: float = support.carried_impulse_total()
+	var rejected: int = w.rejected_step_count
+	check(not support.is_valid(), "the patch must report the non-principal wheel")
+	check(not w.preflight(), "preflight must refuse a non-principal-axis wheel")
+	check(w.last_error.contains("principal axis"), "preflight must report the reason: %s" % w.last_error)
+	check(not w.step(), "step() must be refused")
+	check(w.advance(3.0 * DT) == 0, "advance() must be refused")
+	check(w.rejected_step_count == rejected + 2, "the refused step and advance must be counted")
+	check(w.step_count == steps, "a refused step must not advance the step counter")
+	check(wheel.position == position and wheel.orientation == orientation and wheel.linear_velocity == linear and wheel.angular_velocity == angular,
+			"a refused step must not change the wheel state")
+	check(support.carried_impulse_total() == carried, "a refused step must not touch the carried impulses")
+	check_basis_near(wheel.local_inertia, tensor, 0.0, "the wheel inertia was repaired or projected")
+	check(not w.constraints.is_empty() and w.constraints[0] == support, "the patch must stay registered (it is refused, not skipped)")
+	# Valid again: stepping resumes and the patch supports the wheel.
+	check(wheel.set_mass_properties(good), "fixture error: the valid properties must be accepted again")
+	check(w.preflight(), "preflight must accept the wheel again (%s)" % w.last_error)
+	check(w.step(), "stepping must resume")
+	check(support.normal_load() > 0.0, "the patch must support the wheel again")
+
+
+## O7. Existing invalid-body and constraint validation is intact: an invalid body still reports only the dynamic-body rule, null and static wheels
+## keep their messages, other rules still report next to the new one in a fixed order, and the reference patch stays valid.
+func test_o_existing_invalid_body_and_constraint_validation_is_intact() -> void:
+	# An indefinite tensor makes the mass properties invalid: zeroed, static-looking. The axle rule must not add a misleading second message.
+	var indefinite: SimMassProperties = SimMassProperties.new(100.0, Basis(Vector3(1.0, 2.0, 0.0), Vector3(2.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0)))
+	check(not indefinite.valid, "fixture error: the indefinite tensor must be an invalid inertia")
+	var invalid_wheel: SimRigidBody = SimRigidBody.new(indefinite, Vector3(0.0, R, 0.0))
+	var invalid_errors: PackedStringArray = unchecked_support(make_static(), invalid_wheel).validate()
+	check(invalid_errors == PackedStringArray(["tire patch: the wheel body must be dynamic"]), "an invalid wheel body must report only the dynamic-body rule (got %s)" % "; ".join(invalid_errors))
+	check(try_create({"wheel": invalid_wheel}) == null, "create() accepted an invalid wheel body")
+	# Static wheel and null bodies: unchanged messages.
+	check(unchecked_support(make_static(), make_static()).validate() == PackedStringArray(["tire patch: the wheel body must be dynamic"]),
+			"a static wheel must report only the dynamic-body rule")
+	check(unchecked_support(make_static(), null).validate() == PackedStringArray(["tire patch: bodies must not be null"]), "a null wheel must report the null-body rule")
+	check(unchecked_support(null, wheel_with(MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W))).validate() == PackedStringArray(["tire patch: bodies must not be null"]),
+			"a null ground must report the null-body rule")
+	# Several faults: each rule still reports, the axle rule keeps its fixed place (after the body rules, before the parameter rules).
+	var both = unchecked_support(make_static(), wheel_with(coupled_inertia(COUPLING, 0.0)))
+	both.stiffness_density = 0.0
+	both.max_compression = -1.0
+	var errors: PackedStringArray = both.validate()
+	check(errors.size() == 3, "three faults must give three errors (got %d: %s)" % [errors.size(), "; ".join(errors)])
+	if errors.size() == 3:
+		check(errors[0].contains("principal axis") and errors[1].contains("stiffness density") and errors[2].contains("maximum compression"),
+				"the errors must come in the fixed order axle, stiffness, compression (got %s)" % "; ".join(errors))
+	# Dynamic ground still rejected next to a valid wheel, and the valid reference patch is valid.
+	var dynamic_ground: SimRigidBody = wheel_with(MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W))
+	check(unchecked_support(dynamic_ground, wheel_with(MotorcycleConfig.wheel_inertia(100.0, R, 0.75 * R, W))).validate() == PackedStringArray(["tire patch: the ground body must be static"]),
+			"a dynamic ground must keep its message")
+	check(try_create({}) != null and try_create({}).validate().is_empty(), "the reference patch must stay valid")
+
+
 # ---------------------------------------------------------------- M: determinism
 
 func test_m_runs_are_bit_identical() -> void:

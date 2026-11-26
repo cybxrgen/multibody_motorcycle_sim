@@ -49,14 +49,24 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## (compute_k; effective mass 1/(K_i + gamma_i)). The two maps are deliberately different (VelocityJacobianRow): J_vel_ang is the rate map, J_imp_ang
 ## is the real moment, and neither is derived from the other. Because J_vel_ang is perpendicular to u, no change of the axle spin enters vn_i
 ## or K_i, not at preparation and not in later sequential iterations when the patch's own axle moment (or another constraint) changes the
-## spin; the wheel inertia is axisymmetric about u (u a principal axis), so the axle component of the wrench also does not leak into the
-## off-axle angular velocity through I_w^-1. A previous version removed the initial spin from a frozen row bias; that left the effective mass
+## spin; u is a principal axis of the wheel inertia (a PRECONDITION that validate() enforces, see below), so the axle component of the wrench
+## also does not leak into the off-axle angular velocity through I_w^-1. A previous version removed the initial spin from a frozen row bias; that left the effective mass
 ## and the later iterations on the full Jacobian (an axle-spin change still fed back into vn_i) and is gone: the bias is only the implicit
 ## spring term k_i g_i / (c_i + dt k_i). The Jacobians and u are those of the start of the step (frozen-Jacobian limitation of the project);
 ## the velocities are live. For bottomed (rigid) rows the same velocity map applies, so a spinning bottomed tyre is not pushed by tangential
 ## tread velocity either. Split correction: the split row uses the velocity-side Jacobian to measure and to apply (a pose correction is the gradient of the
 ## gap, which has no axle component; the physical wrench never enters the split velocities). No tangential row exists here: the in-plane and
 ## spin responses of the tyre are not modelled by this constraint (Stage C).
+##
+## ---- Precondition: the wheel axle is a principal axis of the wheel inertia (enforced by validate()) ----
+## The effective mass uses J_vel M^-1 J_vel^T, while the exact response of the row rate to a unit impulse is J_vel M^-1 J_imp^T. They differ by
+## J_vel_ang . I_w^-1 u (u . (r_i x n)): zero for every sample if and only if I_w^-1 u is parallel to u, i.e. u is a principal axis of the
+## wheel inertia (equivalently I u = lambda u). SimMassProperties accepts full non-diagonal tensors, so this is NOT implied by a valid body:
+## validate() rejects a wheel whose body-frame tensor couples the axle (body-local +X) to the transverse axes (axle_principal_axis_error). The
+## check is made in the BODY frame, where the axle is exactly (1, 0, 0) and the tensor is the stored one: the world orientation never enters
+## (I_w u = R I_local R^T R e_x = R I_local e_x, so the property is the same in every orientation, and a world-frame test would only add the
+## float32 rounding of R I R^T). The wheel inertia is never projected, diagonalised or repaired: a wheel that violates the precondition is
+## reported by validate() and SimWorld refuses to step it (the check is part of the ordinary constraint validation / preflight).
 
 ## ---- Excessive penetration (bottoming) ----
 ## A sample compressed by more than `max_compression` (m) at the start of the step is BOTTOMED: its row becomes the rigid non-penetration
@@ -98,6 +108,13 @@ const MAX_COMPRESSION_RATIO: float = 0.5
 const UNIT_TOLERANCE: float = 1.0e-5
 ## Wheel axle in the wheel's own frame (project convention: body-local X).
 const AXLE_LOCAL: Vector3 = Vector3.RIGHT
+## Principal-axis precondition: the products of inertia that couple the axle to the transverse axes (I_xy, I_xz of the body-frame tensor,
+## symmetrised as SimMassProperties does for the stored inverse) may not exceed this fraction of the largest element of the tensor. It
+## is the symmetry tolerance of SimMassProperties (1e-5, about 84 float32 ulps), which already bounds the rounding noise of a tensor
+## assembled through general rotations (measured at most 2.2e-7 of the largest element over 75 such tensors, Tests O5, 45 times below
+## the tolerance); a genuine coupling is orders of magnitude larger. The effective-mass error that a tolerated coupling causes is of
+## the relative size coupling / axial moment (about 1e-5 or less), far below the float32 solver noise.
+const AXLE_PRINCIPAL_REL_TOL: float = 1.0e-5
 
 var geometry: TireGeometry
 var wheel_radius: float = 0.0
@@ -177,6 +194,12 @@ func validate() -> PackedStringArray:
 		errors.append("tire patch: the ground body must be static")
 	if body_b.is_static():
 		errors.append("tire patch: the wheel body must be dynamic")
+	else:
+		# Only a dynamic (hence valid) wheel has an inertia tensor to check; an invalid body is already reported by the rules above
+		# and by SimWorld's mass-property check, and its zeroed tensor must not add a misleading second message.
+		var axle_error: String = axle_principal_axis_error(body_b.local_inertia)
+		if axle_error != "":
+			errors.append(axle_error)
 	var radius_ok: bool = is_finite(wheel_radius) and wheel_radius > 0.0
 	if not radius_ok:
 		errors.append("tire patch: wheel radius must be finite and > 0 (got %s)" % wheel_radius)
@@ -201,6 +224,30 @@ func validate() -> PackedStringArray:
 		errors.append("tire patch: maximum compression %s m must not exceed %s of the wheel radius (%s m)"
 				% [max_compression, MAX_COMPRESSION_RATIO, MAX_COMPRESSION_RATIO * wheel_radius])
 	return errors
+
+
+## "" when the wheel axle (AXLE_LOCAL, the body-local +X axis) is a principal axis of the body-frame inertia tensor `local_inertia`
+## (I e_x parallel to e_x, i.e. I_xy = I_xz = 0), otherwise the validation message. Pure and deterministic: the verdict and the text depend only on
+## the tensor. The tensor is compared in the body frame (never the world frame, see the header) and in float64 scalars; the coupling is
+## the symmetrised product of inertia 0.5 (I_ab + I_ba), the same symmetrisation SimMassProperties applies to the inverse it stores, and
+## the tolerance is AXLE_PRINCIPAL_REL_TOL times the largest element, so the verdict is independent of the physical scale of the tensor.
+## Element (row r, column c) of a Godot Basis is basis[c][r], so I_xy is x.y (and y.x), I_xz is x.z (and z.x). A NaN coupling fails the comparison
+## and is reported; finiteness of the whole tensor is the business of SimMassProperties.validate_inertia(), which every dynamic body has passed.
+static func axle_principal_axis_error(local_inertia: Basis) -> String:
+	var scale: float = 0.0
+	for column in [local_inertia.x, local_inertia.y, local_inertia.z]:
+		scale = maxf(scale, maxf(absf(column.x), maxf(absf(column.y), absf(column.z))))
+	var coupling_xy: float = 0.5 * (local_inertia.x.y + local_inertia.y.x)
+	var coupling_xz: float = 0.5 * (local_inertia.x.z + local_inertia.z.x)
+	var coupling: float = sqrt(coupling_xy * coupling_xy + coupling_xz * coupling_xz)
+	var tolerance: float = AXLE_PRINCIPAL_REL_TOL * scale
+	if coupling <= tolerance:
+		return ""
+	return ("tire patch: the tyre patch normal-support model requires the wheel axle (body-local +X) to be a principal axis of the wheel inertia "
+			+ "tensor, but the tensor couples the axle to the transverse axes (products of inertia I_xy = %s, I_xz = %s kg m^2; coupling %s kg m^2 "
+			+ "exceeds the tolerance %s kg m^2 = %s of the largest tensor element). Define the wheel inertia in a body frame whose +X axis is the "
+			+ "axle principal axis (I_xy = I_xz = 0), for example a diagonal tensor with the axial moment first; the inertia is not modified here.") % [
+			coupling_xy, coupling_xz, coupling, tolerance, AXLE_PRINCIPAL_REL_TOL]
 
 
 ## Implicit spring-damper coefficients of one sample: {gamma, bias_per_gap}. gamma = 1/(dt (c + dt k)) (row softness, m/(N s^2)) and
