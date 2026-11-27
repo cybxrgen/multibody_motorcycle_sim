@@ -1013,11 +1013,14 @@ func _withdraw_tire_response() -> bool:
 	var d_spin: Vector3 = body_b.inverse_inertia_world * _applied_angular
 	var d_roll: Vector3 = body_b.inverse_inertia_world * roll_impulse
 	var velocity: Vector3 = body_b.linear_velocity - d_linear
-	var spin_tangential: Vector3 = body_b.angular_velocity - d_spin
-	var spin: Vector3 = spin_tangential - d_roll
+	# REVERSE ORDER of the application (tangential first, rolling second): the rolling moment comes off first, then the tangential one. float32
+	# sums are not associative: when the tangential contribution is large, the forward sum (w + d_tan) + d_roll may have lost a small d_roll, and
+	# removing d_tan first would then leave a residual of d_roll in the spin; undoing the steps in reverse order cancels exactly that rounding.
+	var spin_rolling: Vector3 = body_b.angular_velocity - d_roll
+	var spin: Vector3 = spin_rolling - d_spin
 	if not (_applied_linear.is_finite() and _applied_angular.is_finite() and is_finite(_rolling_impulse) and _axle.is_finite()
 			and body_b.linear_velocity.is_finite() and body_b.angular_velocity.is_finite() and roll_impulse.is_finite()
-			and d_linear.is_finite() and d_spin.is_finite() and d_roll.is_finite() and velocity.is_finite() and spin_tangential.is_finite() and spin.is_finite()):
+			and d_linear.is_finite() and d_spin.is_finite() and d_roll.is_finite() and velocity.is_finite() and spin_rolling.is_finite() and spin.is_finite()):
 		return false
 	body_b.linear_velocity = velocity
 	body_b.angular_velocity = spin

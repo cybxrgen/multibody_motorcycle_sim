@@ -1266,11 +1266,12 @@ func test_i_d_a_tangential_wrench_with_a_derived_overflow_is_rejected_atomically
 const FLOAT32_NEAR_MAX: float = 3.4028e38
 
 
-## What _withdraw_tire_response() has to produce, derived by the test from the record (the same inverse, evaluated independently).
+## What _withdraw_tire_response() has to produce, derived by the test from the record (the same inverse, evaluated independently; the angular
+## rollback in the reverse order of the application: rolling first, then tangential).
 func withdrawal_candidates(s, wheel: SimRigidBody) -> Dictionary:
 	var d_roll: Vector3 = wheel.inverse_inertia_world * (s._axle * s._rolling_impulse)
 	var d_spin: Vector3 = wheel.inverse_inertia_world * s._applied_angular
-	return {"velocity": wheel.linear_velocity - s._applied_linear * wheel.inverse_mass, "spin": (wheel.angular_velocity - d_spin) - d_roll,
+	return {"velocity": wheel.linear_velocity - s._applied_linear * wheel.inverse_mass, "spin": (wheel.angular_velocity - d_roll) - d_spin,
 			"d_velocity": s._applied_linear * wheel.inverse_mass, "d_spin": d_spin, "d_roll": d_roll}
 
 
@@ -1381,3 +1382,66 @@ func test_i_d_b_an_unrepresentable_withdrawal_is_a_terminal_numerical_fault_that
 			solve_in_place(rig)
 			check(s.contact_active and s.last_reason == "" and not s._tire_failed, "%s: the next valid solve is accepted" % label)
 			check_near(s.longitudinal_force(), fresh["support"].longitudinal_force(), 1.0e-5 * (absf(fresh["support"].longitudinal_force()) + 1.0), "%s: recovered longitudinal force equals a cold solve" % label)
+
+
+func test_i_d_c_angular_withdrawal_reverses_the_application_order_so_a_rounded_rolling_term_leaves_no_residual() -> void:
+	# float32 sums are not associative. The tyre applies the tangential angular impulse first and the rolling-resistance impulse second. When the
+	# tangential contribution is large, (w + d_tan) + d_roll loses a small d_roll (the spacing of float32 there exceeds 2 d_roll), although the
+	# rolling impulse is still recorded. Withdrawing in the SAME order, (w - d_tan) - d_roll, then leaves a residual of d_roll; the reverse order,
+	# (w - d_roll) - d_tan, loses d_roll again at the same place and returns the pre-response spin. Everything here is applied through the real
+	# paths (_apply_tangential_wrench() and _solve_rolling_resistance()) after a real prepare(), in the order of a solver iteration.
+	var spin0: float = pow(2.0, 30.0)  # a multiple of the float32 spacing (2^27) around the tangential spin change below, so the sum is exact
+	var rig: Dictionary = make_rig({"height": R - DELTA, "forward_speed": 6.0, "spin": spin0})
+	var s = rig["support"]
+	var wheel: SimRigidBody = rig["wheel"]
+	var world: SimWorld = rig["world"]
+	var w0: Vector3 = wheel.angular_velocity
+	var v0: Vector3 = wheel.linear_velocity
+	s.prepare(DT, world.config)
+	check(w0.is_finite() and v0.is_finite() and s._axle == Vector3.RIGHT and is_equal_approx(s._spin, spin0), "fixture: finite wheel state, axle +X, frozen spin = the start spin")
+	check(not s._tire_failed and s._withdrawal_fault == "" and record_of(s) == [Vector3.ZERO, Vector3.ZERO, 0.0, 0.0, 0.0], "fixture: nothing recorded yet")
+	# 1. Tangential application with a long lever arm: a modest longitudinal impulse (linear velocity change of 67 m/s) whose moment about the axle
+	# changes the spin by 1.5 * 2^50 rad/s (valid: finite, no overflow; it is the lever that makes it large).
+	var inv_xx: float = wheel.inverse_inertia_world.x.x
+	var lx: float = 1.0e3
+	var lever: float = (1.5 * pow(2.0, 50.0) / inv_xx) / lx
+	s._apply_tangential_wrench(lx, 0.0, wheel.position + Vector3(0.0, lever, 0.0))
+	check(not s._tire_failed and s._applied_angular.x != 0.0 and s._applied_linear != Vector3.ZERO, "the tangential wrench is applied and recorded")
+	var w1: Vector3 = wheel.angular_velocity
+	var d_spin: Vector3 = wheel.inverse_inertia_world * s._applied_angular
+	check(is_equal_approx(w1.x, w0.x + d_spin.x) and absf(w1.x) > 1.0e15, "the tangential angular contribution is applied (about 1.7e15 rad/s)")
+	# 2. Rolling-resistance application (saturated at the frozen spin) with a huge aggregate normal impulse, so that its contribution is large in
+	# absolute terms (about 4e7 rad/s) but still below half the float32 spacing (6.7e7) at the tangential spin.
+	s._solve_rolling_resistance(1.0e10)
+	var w2: Vector3 = wheel.angular_velocity
+	var d_roll: Vector3 = wheel.inverse_inertia_world * (s._axle * s._rolling_impulse)
+	check(not s._tire_failed and s._rolling_impulse != 0.0 and d_roll.x != 0.0, "the rolling impulse is applied and recorded")
+	# Fixture honesty: the rounding-sensitive relationship, computed independently of the implementation.
+	var spacing: float = pow(2.0, floor(log(absf(w1.x)) / log(2.0)) - 23.0)
+	check(absf(d_roll.x) > 1.0e7 and absf(d_roll.x) < 0.5 * spacing, "fixture: the rolling contribution (%s) is large but below half the float32 spacing (%s) of the tangential spin" % [d_roll.x, spacing])
+	check(w2 == w1, "fixture: the forward accumulation order lost the whole rolling contribution (w after rolling == w after tangential)")
+	var old_order: Vector3 = (w2 - d_spin) - d_roll
+	var new_order: Vector3 = (w2 - d_roll) - d_spin
+	var tol_w: float = 2.0 * absf(w0.x) * pow(2.0, -23.0)  # two float32 ulps of the pre-response spin
+	check(absf(old_order.x - w0.x) > 100.0 * tol_w, "fixture: the old (forward) order leaves a residual of %s rad/s, over 100 times the tolerance %s" % [old_order.x - w0.x, tol_w])
+	check(absf(new_order.x - w0.x) <= tol_w, "fixture: the reverse order returns the pre-response spin within the tolerance")
+	var w_before: Vector3 = wheel.angular_velocity
+	var applied_angular: Vector3 = s._applied_angular
+	# Ordinary tyre failure after both responses were applied: the withdrawal runs.
+	s._apply_tangential_wrench(NAN, 0.0, wheel.position)
+	check(s._tire_failed and s._withdrawal_fault == "" and s.validate().is_empty(), "the withdrawal succeeds: an ordinary terminal failure, no numerical fault")
+	check(wheel.angular_velocity.is_finite() and wheel.linear_velocity.is_finite(), "the wheel state is finite")
+	check(absf(wheel.angular_velocity.x - w0.x) <= tol_w, "the spin returns to the pre-response value (residual %s, tolerance %s)" % [wheel.angular_velocity.x - w0.x, tol_w])
+	check(absf(wheel.angular_velocity.x - old_order.x) > 100.0 * tol_w, "and differs from what the forward-order withdrawal would have left")
+	check_vec3_near(wheel.angular_velocity, w0, tol_w, "all angular components return to the pre-response spin")
+	check_vec3_near(wheel.linear_velocity, v0, 2.0 * 73.0 * pow(2.0, -23.0), "the linear velocity returns to the pre-response value (two ulps of the 73 m/s intermediate)")
+	check(record_of(s) == [Vector3.ZERO, Vector3.ZERO, 0.0, 0.0, 0.0], "the response bookkeeping is cleared after the successful withdrawal")
+	check(w_before != wheel.angular_velocity and applied_angular != Vector3.ZERO, "fixture: the record was real and the withdrawal changed the wheel")
+	# Later iterations apply no tyre response; finish() ends the failed contact without stale bookkeeping.
+	for i in 4:
+		s.solve_iteration()
+		check(record_of(s) == [Vector3.ZERO, Vector3.ZERO, 0.0, 0.0, 0.0] and s._tire_failed and s._withdrawal_fault == "", "iteration %d after the failure applies no tyre response and records nothing" % (i + 2))
+	s.finish()
+	check(not s.contact_active and s.last_reason != "" and not s.last_reason.contains("could not be withdrawn"), "finish() ends the failed contact with the ordinary failure reason (%s)" % s.last_reason)
+	check(s._withdrawal_fault == "" and s.validate().is_empty(), "finish(): no withdrawal fault")
+	check_no_tire_state(s, "after finish()")
