@@ -1167,3 +1167,96 @@ func test_i_c_finish_never_clears_the_record_of_a_response_that_the_wheel_still_
 		check(not s.contact_active, "%s: the patch is inactive" % path)
 		check_no_tire_state(s, "%s: the record is cleared" % path)
 		check_wheel_equals_twin(rig["wheel"], twin["wheel"], "%s: and the wheel no longer carries the response" % path)
+
+
+## The candidates that _apply_tangential_wrench() derives for a wrench (the same formulas, evaluated by the test), to prove that a fixture really makes a
+## DERIVED quantity non-finite while the inputs are finite.
+func tangential_candidates(s, wheel: SimRigidBody, lambda_x: float, lambda_y: float, point: Vector3) -> Dictionary:
+	var linear: Vector3 = s._e_x * lambda_x + s._e_y * lambda_y
+	var angular: Vector3 = (point - wheel.position).cross(linear)
+	var d_velocity: Vector3 = (linear - s._applied_linear) * wheel.inverse_mass
+	var d_spin: Vector3 = wheel.inverse_inertia_world * (angular - s._applied_angular)
+	return {"linear": linear, "angular": angular, "d_velocity": d_velocity, "d_spin": d_spin,
+			"velocity": wheel.linear_velocity + d_velocity, "spin": wheel.angular_velocity + d_spin}
+
+
+func test_i_d_a_tangential_wrench_with_a_derived_overflow_is_rejected_atomically() -> void:
+	# The reviewed defect: finite scalar impulses (or a finite lever arm) can still make the derived impulse or velocity update overflow float32; the
+	# old code then wrote INF/NaN into the wheel and half updated the record. Each case calls the tangential application of the solver with FINITE
+	# arguments. "first wrench": nothing was applied before, so the wheel must be bit-identical afterwards. "after a response": an earlier tangential
+	# and rolling-resistance response of the same solve must be withdrawn, the later iterations must not re-apply anything, finish() must agree with
+	# the wheel, and the next solve must equal a cold solve.
+	var cases: Array = [
+		{"name": "linear impulse overflows", "lx": 1.0e300, "ly": 0.0, "lever": Vector3.ZERO, "stage": "impulse"},
+		{"name": "angular impulse overflows through a finite lever arm", "lx": 1.0e30, "ly": 0.0, "lever": Vector3(1.0e30, 1.0e30, 1.0e30), "stage": "impulse"},
+		{"name": "finite impulses, velocity update overflows", "lx": 3.0e8, "ly": 0.0, "lever": Vector3(1.0e30, 0.0, 0.0), "stage": "update"},
+		{"name": "non-finite scalar impulse", "lx": NAN, "ly": 0.0, "lever": Vector3.ZERO, "stage": "input"},
+	]
+	for c in cases:
+		for mode in ["first wrench", "after a response"]:
+			var label: String = "%s / %s" % [c["name"], mode]
+			var opts: Dictionary = {"height": R - DELTA, "forward_speed": 6.0, "spin": 5.0}
+			var rig: Dictionary = make_rig(opts)
+			var twin: Dictionary = make_rig(opts)
+			twin["support"].tire_forces_enabled = false
+			var s = rig["support"]
+			var wheel: SimRigidBody = rig["wheel"]
+			var start: Dictionary = {"v": wheel.linear_velocity, "w": wheel.angular_velocity}
+			s.prepare(DT, rig["world"].config)
+			twin["support"].prepare(DT, twin["world"].config)
+			if mode == "after a response":
+				s.solve_iteration()
+				twin["support"].solve_iteration()
+				check((wheel.linear_velocity - twin["wheel"].linear_velocity).length() > 0.05 and s.rolling_resistance_torque() != 0.0 and s.tangential_force_world() != Vector3.ZERO,
+						"%s: fixture: a tangential and a rolling-resistance response are applied before the fault" % label)
+			else:
+				check_no_tire_state(s, "%s: fixture: nothing applied yet" % label)
+			# Fixture honesty: finite and valid before the triggering call, and the derived quantity of the case really is not finite.
+			var point: Vector3 = wheel.position + c["lever"]
+			var lx: float = c["lx"]
+			var ly: float = c["ly"]
+			check(not s._tire_failed and s._applied_linear.is_finite() and s._applied_angular.is_finite() and wheel.linear_velocity.is_finite() and wheel.angular_velocity.is_finite() and point.is_finite(),
+					"%s: fixture: finite, valid state before the call" % label)
+			if c["stage"] == "input":
+				check(not is_finite(lx), "%s: fixture: the scalar impulse is not finite" % label)
+			else:
+				check(is_finite(lx) and is_finite(ly), "%s: fixture: the scalar impulses are finite" % label)
+				var cand: Dictionary = tangential_candidates(s, wheel, lx, ly, point)
+				if c["stage"] == "impulse":
+					check(not (cand["linear"].is_finite() and cand["angular"].is_finite()), "%s: fixture: a derived impulse is not finite" % label)
+				else:
+					check(cand["linear"].is_finite() and cand["angular"].is_finite(), "%s: fixture: the derived impulses are finite" % label)
+					check(not (cand["d_velocity"].is_finite() and cand["d_spin"].is_finite() and cand["velocity"].is_finite() and cand["spin"].is_finite()),
+							"%s: fixture: the velocity update or a resulting velocity is not finite" % label)
+			var before_v: Vector3 = wheel.linear_velocity
+			var before_w: Vector3 = wheel.angular_velocity
+			s._apply_tangential_wrench(lx, ly, point)
+			check(s._tire_failed, "%s: the failure is detected" % label)
+			check(wheel.linear_velocity.is_finite() and wheel.angular_velocity.is_finite(), "%s: the wheel state is finite" % label)
+			check_no_tire_state(s, "%s: no tangential or rolling-resistance state is left" % label)
+			check(s._applied_linear == Vector3.ZERO and s._applied_angular == Vector3.ZERO and s._rolling_impulse == 0.0, "%s: the record is zero" % label)
+			if mode == "first wrench":
+				check(wheel.linear_velocity == before_v and wheel.angular_velocity == before_w, "%s: the wheel is bit-identical (nothing of the invalid wrench was applied)" % label)
+			check_wheel_equals_twin(wheel, twin["wheel"], "%s: the wheel equals the tyre-less twin" % label)
+			# The world keeps iterating: nothing may be applied again.
+			for i in 5:
+				s.solve_iteration()
+				twin["support"].solve_iteration()
+				check_wheel_equals_twin(wheel, twin["wheel"], "%s: iteration %d after the failure" % [label, i + 2])
+				check_no_tire_state(s, "%s: iteration %d after the failure" % [label, i + 2])
+			s.finish()
+			twin["support"].finish()
+			check(not s.contact_active and s.last_reason.contains("non-finite"), "%s: finish reports the failure (%s)" % [label, s.last_reason])
+			check_no_tire_state(s, "%s: bookkeeping after finish" % label)
+			check_wheel_equals_twin(wheel, twin["wheel"], "%s: physical state agrees with the bookkeeping after finish" % label)
+			# Recovery: a new valid solve from the same start state equals a cold solve of a fresh rig.
+			wheel.linear_velocity = start["v"]
+			wheel.angular_velocity = start["w"]
+			var fresh: Dictionary = make_rig(opts)
+			solve_in_place(fresh)
+			solve_in_place(rig)
+			check(s.contact_active and s.last_reason == "" and not s._tire_failed, "%s: the next valid solve is accepted" % label)
+			check(absf(s.longitudinal_force()) > 1.0, "%s: and the tyre acts again" % label)
+			check_near(s.longitudinal_force(), fresh["support"].longitudinal_force(), 1.0e-5 * (absf(fresh["support"].longitudinal_force()) + 1.0), "%s: recovered longitudinal force equals a cold solve" % label)
+			check_vec3_near(wheel.linear_velocity, fresh["wheel"].linear_velocity, 1.0e-5 * (fresh["wheel"].linear_velocity.length() + 1.0), "%s: recovered wheel velocity equals a cold solve" % label)
+			check_vec3_near(wheel.angular_velocity, fresh["wheel"].angular_velocity, 1.0e-5 * (fresh["wheel"].angular_velocity.length() + 1.0), "%s: recovered wheel spin equals a cold solve" % label)
