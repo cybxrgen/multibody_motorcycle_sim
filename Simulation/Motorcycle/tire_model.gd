@@ -138,3 +138,48 @@ static func rolling_resistance_force(rolling_speed: float, normal_load: float, c
 		return 0.0
 	var x: float = rolling_speed / speed_scale
 	return -coefficient * normal_load * x / sqrt(1.0 + x * x)
+
+
+## Scales the tangential impulse (lx, ly) radially into the friction ellipse of the normal impulse `ln`:
+## (lx / (mu_x ln))^2 + (ly / (mu_y ln))^2 <= 1. Zero for ln <= 0 or a non-positive limit. One common factor on both components (never per-axis).
+## Shared by TireGroundContact (one point) and TirePatchNormalSupport (aggregate patch): the same law for both owners.
+static func into_ellipse(lx: float, ly: float, ln: float, mu_x: float, mu_y: float) -> Vector2:
+	if not (ln > 0.0 and mu_x > 0.0 and mu_y > 0.0):
+		return Vector2.ZERO
+	var ux: float = lx / (mu_x * ln)
+	var uy: float = ly / (mu_y * ln)
+	var u: float = sqrt(ux * ux + uy * uy)
+	if u > 1.0:
+		return Vector2(lx / u, ly / u)
+	return Vector2(lx, ly)
+
+
+## One implicit (backward-Euler) tangential update of the tyre solve, shared by the one-point contact and the patch. Inputs: the CURRENT slip
+## velocities (s_x, s_y) of the wheel (m/s), the current normal impulse `ln` (N s), the tangential impulse already applied (cur_x, cur_y),
+## the exact 2x2 response G = S M^-1 P^T of the slip velocities to unit tangential impulses (row-major g00, g01, g10, g11), the slip
+## stiffnesses, the friction limits and the reference speed d. It returns the new total impulse (lambda_x, lambda_y) after the radial projection
+## into the ellipse. lambda = A sigma(lambda) + ..., A = diag(phi k_x ln, phi k_y ln), sigma = (s + G (lambda - cur)) / d, solved in closed form
+## with phi lagged (PHYSICS_CONVENTIONS.md, "Tyre behaviour"). A singular or non-finite 2x2 system keeps the current impulse (then projected).
+static func implicit_tangential_impulse(s_x: float, s_y: float, ln: float, cur_x: float, cur_y: float, g00: float, g01: float, g10: float,
+		g11: float, k_x: float, k_y: float, mu_x: float, mu_y: float, d: float) -> Vector2:
+	var ex: float = k_x * s_x / d / mu_x
+	var ey: float = k_y * s_y / d / mu_y
+	var phi: float = reduction(sqrt(ex * ex + ey * ey))
+	var ax: float = phi * k_x * ln  # = dt * N * phi * k_x (lambda_n = N dt)
+	var ay: float = phi * k_y * ln
+	# (I - A G / D) lambda = A (s - G lambda_cur) / D
+	var m00: float = 1.0 - ax * g00 / d
+	var m01: float = -ax * g01 / d
+	var m10: float = -ay * g10 / d
+	var m11: float = 1.0 - ay * g11 / d
+	var q_x: float = s_x - (g00 * cur_x + g01 * cur_y)
+	var q_y: float = s_y - (g10 * cur_x + g11 * cur_y)
+	var b_x: float = ax * q_x / d
+	var b_y: float = ay * q_y / d
+	var det: float = m00 * m11 - m01 * m10
+	var target: Vector2
+	if is_finite(det) and det > 1.0e-9:
+		target = Vector2((m11 * b_x - m01 * b_y) / det, (-m10 * b_x + m00 * b_y) / det)
+	else:
+		target = Vector2(cur_x, cur_y)
+	return into_ellipse(target.x, target.y, ln, mu_x, mu_y)
