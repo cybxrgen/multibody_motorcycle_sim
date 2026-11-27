@@ -1422,19 +1422,25 @@ func test_i_d_c_angular_withdrawal_reverses_the_application_order_so_a_rounded_r
 	check(w2 == w1, "fixture: the forward accumulation order lost the whole rolling contribution (w after rolling == w after tangential)")
 	var old_order: Vector3 = (w2 - d_spin) - d_roll
 	var new_order: Vector3 = (w2 - d_roll) - d_spin
-	var tol_w: float = 2.0 * absf(w0.x) * pow(2.0, -23.0)  # two float32 ulps of the pre-response spin
-	check(absf(old_order.x - w0.x) > 100.0 * tol_w, "fixture: the old (forward) order leaves a residual of %s rad/s, over 100 times the tolerance %s" % [old_order.x - w0.x, tol_w])
-	check(absf(new_order.x - w0.x) <= tol_w, "fixture: the reverse order returns the pre-response spin within the tolerance")
+	# Tolerances of the VECTOR comparisons below (TESTING.md tolerance policy: float32 Vector3 quantities use >= 1e-6 relative to the magnitude of the
+	# compared vector). Spin: 1e-6 * |w0| = 1.07e3 rad/s for the pre-response spin of 2^30 rad/s. The fixture makes the spin sum exact (w0 is a multiple of
+	# the float32 spacing at the tangential spin), so the reverse order is expected to return w0 with no error at all; the tolerance covers the float32
+	# representation of the result, not a rounding of the sum. The old order leaves d_roll = 4.1e7 rad/s, about 38000 times this tolerance, which is what
+	# separates the two orders (the margin is asserted below, as a factor of 1000). Linear velocity: 1e-6 * |v0| = 6e-6 m/s for 6 m/s.
+	# The scalar facts that establish the rounding mechanism above (the spacing, the half spacing, the lost term) stay exact float64 scalar checks.
+	var tol_w: float = 1.0e-6 * w0.length()
+	var tol_v: float = 1.0e-6 * v0.length()
+	check((old_order - w0).length() > 1000.0 * tol_w, "fixture: the old (forward) order leaves a residual of %s rad/s, over 1000 times the tolerance %s" % [(old_order - w0).length(), tol_w])
+	check((new_order - w0).length() <= tol_w, "fixture: the reverse order returns the pre-response spin within the tolerance")
 	var w_before: Vector3 = wheel.angular_velocity
 	var applied_angular: Vector3 = s._applied_angular
 	# Ordinary tyre failure after both responses were applied: the withdrawal runs.
 	s._apply_tangential_wrench(NAN, 0.0, wheel.position)
 	check(s._tire_failed and s._withdrawal_fault == "" and s.validate().is_empty(), "the withdrawal succeeds: an ordinary terminal failure, no numerical fault")
 	check(wheel.angular_velocity.is_finite() and wheel.linear_velocity.is_finite(), "the wheel state is finite")
-	check(absf(wheel.angular_velocity.x - w0.x) <= tol_w, "the spin returns to the pre-response value (residual %s, tolerance %s)" % [wheel.angular_velocity.x - w0.x, tol_w])
-	check(absf(wheel.angular_velocity.x - old_order.x) > 100.0 * tol_w, "and differs from what the forward-order withdrawal would have left")
-	check_vec3_near(wheel.angular_velocity, w0, tol_w, "all angular components return to the pre-response spin")
-	check_vec3_near(wheel.linear_velocity, v0, 2.0 * 73.0 * pow(2.0, -23.0), "the linear velocity returns to the pre-response value (two ulps of the 73 m/s intermediate)")
+	check_vec3_near(wheel.angular_velocity, w0, tol_w, "the spin returns to the pre-response value (all components, 1e-6 relative)")
+	check((wheel.angular_velocity - old_order).length() > 1000.0 * tol_w, "and differs from what the forward-order withdrawal would have left by over 1000 times the tolerance")
+	check_vec3_near(wheel.linear_velocity, v0, tol_v, "the linear velocity returns to the pre-response value (1e-6 relative)")
 	check(record_of(s) == [Vector3.ZERO, Vector3.ZERO, 0.0, 0.0, 0.0], "the response bookkeeping is cleared after the successful withdrawal")
 	check(w_before != wheel.angular_velocity and applied_angular != Vector3.ZERO, "fixture: the record was real and the withdrawal changed the wheel")
 	# Later iterations apply no tyre response; finish() ends the failed contact without stale bookkeeping.
