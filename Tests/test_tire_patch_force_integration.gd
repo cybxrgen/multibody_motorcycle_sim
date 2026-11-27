@@ -1260,3 +1260,124 @@ func test_i_d_a_tangential_wrench_with_a_derived_overflow_is_rejected_atomically
 			check_near(s.longitudinal_force(), fresh["support"].longitudinal_force(), 1.0e-5 * (absf(fresh["support"].longitudinal_force()) + 1.0), "%s: recovered longitudinal force equals a cold solve" % label)
 			check_vec3_near(wheel.linear_velocity, fresh["wheel"].linear_velocity, 1.0e-5 * (fresh["wheel"].linear_velocity.length() + 1.0), "%s: recovered wheel velocity equals a cold solve" % label)
 			check_vec3_near(wheel.angular_velocity, fresh["wheel"].angular_velocity, 1.0e-5 * (fresh["wheel"].angular_velocity.length() + 1.0), "%s: recovered wheel spin equals a cold solve" % label)
+
+
+## A finite float32 just below its maximum (3.4028235e38): "a wheel state near the representational limit".
+const FLOAT32_NEAR_MAX: float = 3.4028e38
+
+
+## What _withdraw_tire_response() has to produce, derived by the test from the record (the same inverse, evaluated independently).
+func withdrawal_candidates(s, wheel: SimRigidBody) -> Dictionary:
+	var d_roll: Vector3 = wheel.inverse_inertia_world * (s._axle * s._rolling_impulse)
+	var d_spin: Vector3 = wheel.inverse_inertia_world * s._applied_angular
+	return {"velocity": wheel.linear_velocity - s._applied_linear * wheel.inverse_mass, "spin": (wheel.angular_velocity - d_spin) - d_roll,
+			"d_velocity": s._applied_linear * wheel.inverse_mass, "d_spin": d_spin, "d_roll": d_roll}
+
+
+## A rig whose tyre response is genuinely applied and recorded (iteration 1), then enlarged by a further VALID application so that the record is
+## large but finite: "linear" (huge linear impulse), "angular" (huge lever arm, so a huge angular impulse) or "rolling" (a huge rolling-resistance
+## impulse, applied to the wheel and the record exactly as _solve_rolling_resistance() does). With `near_limit` the wheel velocity is then moved to
+## just below the float32 limit, on the side that makes the rollback overflow (a state that the solver itself never rejected: it is finite).
+func withdrawal_fixture(kind: String, near_limit: bool) -> Dictionary:
+	var rig: Dictionary = make_rig({"height": R - DELTA, "forward_speed": 6.0, "spin": 5.0})
+	var s = rig["support"]
+	var wheel: SimRigidBody = rig["wheel"]
+	rig["start"] = {"v": wheel.linear_velocity, "w": wheel.angular_velocity}
+	s.prepare(DT, rig["world"].config)
+	s.solve_iteration()
+	match kind:
+		"linear":
+			s._apply_tangential_wrench(1.0e36, 0.0, wheel.position)
+		"angular":
+			s._apply_tangential_wrench(1.0e20, 0.0, wheel.position + Vector3(0.0, 1.0e17, 0.0))
+		"rolling":
+			var extra: float = 1.0e36
+			wheel.angular_velocity += wheel.inverse_inertia_world * (s._axle * extra)
+			s._rolling_impulse += extra
+	var cand: Dictionary = withdrawal_candidates(s, wheel)
+	if near_limit:
+		match kind:
+			"linear":
+				wheel.linear_velocity = -cand["d_velocity"].sign() * FLOAT32_NEAR_MAX
+			"angular":
+				wheel.angular_velocity = -cand["d_spin"].sign() * FLOAT32_NEAR_MAX
+			"rolling":
+				wheel.angular_velocity = -cand["d_roll"].sign() * FLOAT32_NEAR_MAX
+	rig["candidates"] = withdrawal_candidates(s, wheel)
+	return rig
+
+
+func record_of(s) -> Array:
+	return [s._applied_linear, s._applied_angular, s._rolling_impulse, s._tire_lx, s._tire_ly]
+
+
+func test_i_d_b_an_unrepresentable_withdrawal_is_a_terminal_numerical_fault_that_keeps_the_record() -> void:
+	# The reviewed defect: a failure after an applied response withdrew it by subtracting the recorded impulses WITHOUT validating the result. A finite
+	# wheel state near the float32 limit then became INF/NaN (or was half updated) and the record was cleared as if the rollback had succeeded. Now the
+	# rollback is validated and atomic; when it is not representable nothing is written or cleared, the failure is terminal and reported as a numerical
+	# fault (last_reason, validate() and with it SimWorld's preflight) until reset_warm_start().
+	for kind in ["linear", "angular", "rolling"]:
+		# Control: the same large record with the wheel NOT near the limit is withdrawn completely, with no fault.
+		var control: Dictionary = withdrawal_fixture(kind, false)
+		var cs = control["support"]
+		check(control["candidates"]["velocity"].is_finite() and control["candidates"]["spin"].is_finite(), "%s control: fixture: the rollback is representable" % kind)
+		cs._apply_tangential_wrench(NAN, 0.0, control["wheel"].position)
+		check(cs._tire_failed and cs._withdrawal_fault == "" and cs.validate().is_empty(), "%s control: a representable rollback is an ordinary failure, not a fault" % kind)
+		check(cs._applied_linear == Vector3.ZERO and cs._applied_angular == Vector3.ZERO and cs._rolling_impulse == 0.0, "%s control: the record is cleared because the response was withdrawn" % kind)
+		check(control["wheel"].linear_velocity.is_finite() and control["wheel"].angular_velocity.is_finite(), "%s control: the wheel is finite" % kind)
+
+		for trigger in ["failing wrench", "finish with failed flag"]:
+			var label: String = "%s / %s" % [kind, trigger]
+			var rig: Dictionary = withdrawal_fixture(kind, true)
+			var s = rig["support"]
+			var wheel: SimRigidBody = rig["wheel"]
+			var cand: Dictionary = rig["candidates"]
+			# Fixture honesty: a valid applied response, a finite wheel state, and an inverse that is NOT representable.
+			check(not s._tire_failed and s._withdrawal_fault == "" and s._applied_linear.is_finite() and s._applied_angular.is_finite() and is_finite(s._rolling_impulse), "%s: fixture: valid, finite record before the failure" % label)
+			check(s._applied_linear != Vector3.ZERO or s._applied_angular != Vector3.ZERO or s._rolling_impulse != 0.0, "%s: fixture: a response is recorded" % label)
+			check(wheel.linear_velocity.is_finite() and wheel.angular_velocity.is_finite(), "%s: fixture: the wheel state is finite (near the float32 limit)" % label)
+			check(not (cand["velocity"].is_finite() and cand["spin"].is_finite()), "%s: fixture: the rollback velocity is not finite" % label)
+			var before_v: Vector3 = wheel.linear_velocity
+			var before_w: Vector3 = wheel.angular_velocity
+			var before_record: Array = record_of(s)
+			if trigger == "failing wrench":
+				s._apply_tangential_wrench(NAN, 0.0, wheel.position)
+			else:
+				s._tire_failed = true
+				s.finish()
+			check(s._tire_failed and s._withdrawal_fault != "", "%s: the failure is a terminal numerical fault" % label)
+			check(wheel.linear_velocity == before_v and wheel.angular_velocity == before_w and wheel.linear_velocity.is_finite() and wheel.angular_velocity.is_finite(),
+					"%s: the wheel is finite and bit-identical (no partial or clamped rollback)" % label)
+			check(record_of(s) == before_record and (s._applied_linear != Vector3.ZERO or s._applied_angular != Vector3.ZERO or s._rolling_impulse != 0.0),
+					"%s: the record is not cleared as if the rollback had succeeded" % label)
+			check(s.validate().size() == 1 and String(s.validate()[0]).contains("could not be withdrawn"), "%s: validate() reports the fault" % label)
+			if trigger == "failing wrench":
+				# Later iterations apply nothing and withdraw nothing again: the record stays exactly as it was. (The NORMAL rows of the patch keep solving, as
+				# after any tyre failure, so the wheel velocity itself may move by their impulses; it must stay finite.)
+				for i in 6:
+					s.solve_iteration()
+					check(wheel.linear_velocity.is_finite() and wheel.angular_velocity.is_finite(), "%s: iteration %d after the fault: the wheel stays finite" % [label, i + 2])
+					check(record_of(s) == before_record and s._tire_failed, "%s: iteration %d after the fault leaves the record untouched and the failure terminal" % [label, i + 2])
+				before_v = wheel.linear_velocity
+				before_w = wheel.angular_velocity
+				s.finish()
+			check(not s.contact_active and s.last_reason.contains("could not be withdrawn"), "%s: finish() reports the numerical fault (%s)" % [label, s.last_reason])
+			check(wheel.linear_velocity == before_v and wheel.angular_velocity == before_w, "%s: finish() leaves the wheel untouched" % label)
+			check(record_of(s) == before_record and s._tire_failed and s.carried_tire_impulse() == Vector3.ZERO,
+					"%s: finish() holds the record, keeps the failure terminal and carries no warm start" % label)
+			# The world refuses to step while the constraint reports the fault (the existing preflight channel).
+			check(not rig["world"].preflight() and rig["world"].last_error.contains("could not be withdrawn"), "%s: SimWorld refuses to step (%s)" % [label, rig["world"].last_error])
+			# A solve that is started anyway applies no tyre response and keeps the record.
+			s.prepare(DT, rig["world"].config)
+			check(s._tire_failed and record_of(s) == before_record, "%s: a later prepare() keeps the failure terminal and the record" % label)
+			# Release: reset_warm_start() (aborted step / repaired wheel) clears everything, and a valid solve then equals a cold solve.
+			s.reset_warm_start()
+			check(s._withdrawal_fault == "" and not s._tire_failed and s.validate().is_empty(), "%s: reset_warm_start() releases the fault" % label)
+			check_no_tire_state(s, "%s: after the release" % label)
+			wheel.linear_velocity = rig["start"]["v"]
+			wheel.angular_velocity = rig["start"]["w"]
+			var fresh: Dictionary = make_rig({"height": R - DELTA, "forward_speed": 6.0, "spin": 5.0})
+			solve_in_place(fresh)
+			solve_in_place(rig)
+			check(s.contact_active and s.last_reason == "" and not s._tire_failed, "%s: the next valid solve is accepted" % label)
+			check_near(s.longitudinal_force(), fresh["support"].longitudinal_force(), 1.0e-5 * (absf(fresh["support"].longitudinal_force()) + 1.0), "%s: recovered longitudinal force equals a cold solve" % label)

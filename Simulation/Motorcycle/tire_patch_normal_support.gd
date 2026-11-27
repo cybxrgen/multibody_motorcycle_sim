@@ -116,7 +116,9 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## LIFECYCLE. No positive aggregate normal impulse (separation, invalid sampling, abort, reset), a non-finite aggregate or derived solver
 ## value, disabled tyre forces or degenerate axes: tangential impulse, rolling impulse, reported forces and the carried impulse are zero and
 ## nothing of the aggregate point or velocity is kept. A non-finite aggregate state is never repaired by skipping samples: the tyre response
-## is withdrawn in that iteration and finish() clears the whole patch with `last_reason`.
+## is withdrawn in that iteration and finish() clears the whole patch with `last_reason`. If that withdrawal is itself not representable in float32
+## (a wheel state near the float32 limit), nothing is written or cleared: the response stays recorded as what the wheel carries, the failure stays
+## terminal, `last_reason` and validate() report the numerical fault (SimWorld then refuses to step) until reset_warm_start() (see _withdrawal_fault).
 
 ## ---- Lifecycle (every fixed step, in prepare()) ----
 ## The samples are re-derived from the start-of-step pose (TirePatchSampler, Stage A; the profile is never re-derived here). Samples are
@@ -225,6 +227,12 @@ var _applied_angular: Vector3 = Vector3.ZERO
 var _carried_world: Vector3 = Vector3.ZERO
 var _rolling_impulse: float = 0.0  # rolling-resistance angular impulse about the axle u applied in this step (N m s)
 var _tire_failed: bool = false
+## Terminal numerical fault of the failure path: "" normally; otherwise the description of a tyre response that could NOT be withdrawn because the
+## inverse of what it applied is not representable in float32 (see _withdraw_tire_response()). While it is set the wheel still carries the recorded
+## wrench, the record (_applied_*, _rolling_impulse, _tire_lx/_tire_ly) is HELD (never cleared, so it keeps describing what the wheel carries),
+## no tyre response is applied (_tire_failed stays true), and validate() reports it so SimWorld's preflight refuses further steps. Only
+## reset_warm_start() (an aborted step, or the caller after repairing the wheel state) releases it.
+var _withdrawal_fault: String = ""
 
 
 func _init(p_ground: SimRigidBody, p_wheel: SimRigidBody, p_geometry: TireGeometry, p_wheel_radius: float, p_plane_point: Vector3,
@@ -329,6 +337,9 @@ func validate() -> PackedStringArray:
 		errors.append_array(tire.validate(wheel_radius if radius_ok else 0.0))
 		if not (is_finite(surface_friction) and surface_friction > 0.0):
 			errors.append("tire patch: surface friction must be finite and > 0 (got %s)" % surface_friction)
+	if _withdrawal_fault != "":
+		# A runtime fault, not bad data: reported here because validate() is the channel through which SimWorld's preflight refuses to step.
+		errors.append(_withdrawal_fault)
 	return errors
 
 
@@ -735,10 +746,10 @@ func finish() -> void:
 	if not contact_active or not (_dt > 0.0):
 		return
 	if _tire_failed:
-		# A failed response has already withdrawn everything it applied and applied nothing since (it is terminal for the solve), so this removes
-		# nothing; it keeps the invariant that the bookkeeping is never cleared while the wheel still carries the impulse it records.
-		_withdraw_tire_response()
-		last_reason = "non-finite aggregate tire state or derived tyre solver value"
+		# A failed response has either withdrawn everything it applied (and applied nothing since: it is terminal for the solve), which makes the
+		# call below a no-op, or it could not (_withdrawal_fault): then the record is held, not cleared, because the wheel still carries it.
+		_withdraw_or_hold()
+		last_reason = _withdrawal_fault if _withdrawal_fault != "" else "non-finite aggregate tire state or derived tyre solver value"
 		_clear_state()
 		return
 	var total: float = 0.0
@@ -747,7 +758,8 @@ func finish() -> void:
 		_sample_load.append(load)
 		total += load
 	if not is_finite(total):
-		_withdraw_tire_response()
+		_fail_tire_response()
+		last_reason = _withdrawal_fault if _withdrawal_fault != "" else "non-finite aggregate tire state or derived tyre solver value"
 		_clear_state()
 		return
 	_load = total
@@ -758,6 +770,7 @@ func finish() -> void:
 ## SimWorld calls it after an aborted step: every carried impulse and every derived result is discarded.
 func reset_warm_start() -> void:
 	super()
+	_withdrawal_fault = ""  # the only release of a withdrawal fault (the wheel state was restored by the abort or repaired by the caller)
 	_clear_state()
 
 
@@ -779,16 +792,21 @@ func _clear_state() -> void:
 # --- Stage C: tyre response ---
 
 ## Discards the whole tyre state: tangential impulse, applied wrench, carried impulse, rolling impulse, aggregate and the frame of the last step.
+## EXCEPT a held withdrawal fault (see `_withdrawal_fault`): the wheel still carries that response, so its record, the tangential impulse that
+## produced it and the failure flag survive every clear except reset_warm_start(); the aggregate, the frame and the carried (warm start) impulse
+## are still discarded, so nothing of it is carried into a later solve.
 func _clear_tire_state() -> void:
 	_axes_valid = false
 	_agg_impulse = 0.0
 	_agg_point = Vector3.ZERO
 	_agg_valid = false
+	_carried_world = Vector3.ZERO
+	if _withdrawal_fault != "":
+		return
 	_tire_lx = 0.0
 	_tire_ly = 0.0
 	_applied_linear = Vector3.ZERO
 	_applied_angular = Vector3.ZERO
-	_carried_world = Vector3.ZERO
 	_rolling_impulse = 0.0
 	_tire_failed = false
 
@@ -816,6 +834,15 @@ func _capture_tire_frame() -> void:
 ## Resets the solve state of the tyre response and applies the warm start: the carried tangential impulse, projected into the current tangent
 ## plane and scaled into the current ellipse, at the effective point of the warm-started normal rows. Cold when there is no load.
 func _prepare_tire(config) -> void:
+	if _withdrawal_fault != "":
+		# A held withdrawal fault is terminal until reset_warm_start(): no response is applied and the record of what the wheel still carries stays.
+		_tire_failed = true
+		_carried_world = Vector3.ZERO
+		_agg_impulse = 0.0
+		_agg_point = Vector3.ZERO
+		_agg_valid = false
+		last_reason = _withdrawal_fault
+		return
 	_tire_lx = 0.0
 	_tire_ly = 0.0
 	_applied_linear = Vector3.ZERO
@@ -850,7 +877,7 @@ func _apply_tangential_wrench(lambda_x: float, lambda_y: float, point: Vector3) 
 	# Validate-then-apply: every candidate is derived first and the wheel and the bookkeeping are touched only when ALL of them are finite. Finite
 	# scalar impulses can still overflow here (a Vector3 is float32), so the derived impulses, their changes, the velocity changes and the resulting
 	# velocities are checked, not just the inputs. An invalid candidate is a tyre failure (never clamped to zero, never half applied); a valid zero
-	# response is finite and passes. The record is therefore always finite, which _withdraw_tire_response() relies on.
+	# response is finite and passes. The record is therefore always finite (_withdraw_tire_response() still validates it and the rollback it derives).
 	var valid: bool = is_finite(lambda_x) and is_finite(lambda_y) and point.is_finite()
 	var linear: Vector3 = Vector3.ZERO
 	var angular: Vector3 = Vector3.ZERO
@@ -952,22 +979,51 @@ func _solve_rolling_resistance(ln: float) -> void:
 
 ## The ONE tyre-failure path. The tyre response of this solve is marked failed (TERMINAL until the next prepare() or a clear: every later iteration
 ## returns before applying anything) and whatever it has applied to the wheel is withdrawn, so the wheel is left as the normal rows alone made it.
+## If that withdrawal is not representable the fault is held instead (_withdraw_or_hold()): the failure is then a terminal NUMERICAL FAULT.
 func _fail_tire_response() -> void:
 	_tire_failed = true
-	_withdraw_tire_response()
+	_withdraw_or_hold()
+
+
+## Withdraws the recorded response, or, when its inverse cannot be represented, holds the record and raises the terminal numerical fault.
+## Never clamps and never half applies. A fault already held is left as it is (the record is not touched a second time).
+func _withdraw_or_hold() -> void:
+	if _withdrawal_fault != "":
+		return
+	if not _withdraw_tire_response():
+		_withdrawal_fault = "tire patch: the tyre response could not be withdrawn because the inverse of the recorded wrench is not representable (non-finite recorded impulse or wheel velocity, or a rollback beyond the float32 range; linear impulse %s, angular impulse %s, rolling impulse %s). The wheel keeps the recorded response and the record is held; reset_warm_start() releases it after the wheel state is repaired" % [_applied_linear, _applied_angular, _rolling_impulse]
 
 
 ## Removes from the wheel the tangential wrench and the rolling-resistance moment that this solve has applied, using the bookkeeping that recorded
-## them (the exact inverse of what _apply_tangential_wrench() and _solve_rolling_resistance() added), then zeroes that bookkeeping. A record that
-## is not finite was never applied (both response paths validate before they apply) and is dropped without touching the wheel.
-func _withdraw_tire_response() -> void:
-	if _applied_linear.is_finite() and _applied_angular.is_finite():
-		body_b.linear_velocity -= _applied_linear * body_b.inverse_mass
-		body_b.angular_velocity -= body_b.inverse_inertia_world * _applied_angular
-	if is_finite(_rolling_impulse):
-		body_b.angular_velocity -= body_b.inverse_inertia_world * (_axle * _rolling_impulse)
+## them (the exact inverse of what _apply_tangential_wrench() and _solve_rolling_resistance() added), then zeroes that bookkeeping. Returns true when
+## the wheel no longer carries the response (including when nothing was recorded).
+## VALIDATE-THEN-WRITE, like both response paths: the record, the wheel velocities, every velocity change and both resulting velocities are checked
+## BEFORE either velocity is written, so the rollback is atomic (linear, tangential angular and rolling angular parts together, never one without the
+## others) and a Vector3 (float32) overflow cannot reach the wheel. A finite wheel state near the float32 limit can still have a non-representable
+## inverse, and a clamp would not be a rollback (the record would no longer equal what the wheel carries), so in that case NOTHING is written or cleared
+## and false is returned; the caller turns that into the held numerical fault. A non-finite record is not "never applied" (that was only true while
+## nothing could tamper with it): it cannot be inverted, hence also a fault.
+func _withdraw_tire_response() -> bool:
+	if _applied_linear == Vector3.ZERO and _applied_angular == Vector3.ZERO and _rolling_impulse == 0.0:
+		_tire_lx = 0.0
+		_tire_ly = 0.0
+		return true  # nothing recorded, nothing to invert
+	var roll_impulse: Vector3 = _axle * _rolling_impulse
+	var d_linear: Vector3 = _applied_linear * body_b.inverse_mass
+	var d_spin: Vector3 = body_b.inverse_inertia_world * _applied_angular
+	var d_roll: Vector3 = body_b.inverse_inertia_world * roll_impulse
+	var velocity: Vector3 = body_b.linear_velocity - d_linear
+	var spin_tangential: Vector3 = body_b.angular_velocity - d_spin
+	var spin: Vector3 = spin_tangential - d_roll
+	if not (_applied_linear.is_finite() and _applied_angular.is_finite() and is_finite(_rolling_impulse) and _axle.is_finite()
+			and body_b.linear_velocity.is_finite() and body_b.angular_velocity.is_finite() and roll_impulse.is_finite()
+			and d_linear.is_finite() and d_spin.is_finite() and d_roll.is_finite() and velocity.is_finite() and spin_tangential.is_finite() and spin.is_finite()):
+		return false
+	body_b.linear_velocity = velocity
+	body_b.angular_velocity = spin
 	_applied_linear = Vector3.ZERO
 	_applied_angular = Vector3.ZERO
 	_tire_lx = 0.0
 	_tire_ly = 0.0
 	_rolling_impulse = 0.0
+	return true
