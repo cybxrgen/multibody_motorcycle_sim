@@ -735,6 +735,9 @@ func finish() -> void:
 	if not contact_active or not (_dt > 0.0):
 		return
 	if _tire_failed:
+		# A failed response has already withdrawn everything it applied and applied nothing since (it is terminal for the solve), so this removes
+		# nothing; it keeps the invariant that the bookkeeping is never cleared while the wheel still carries the impulse it records.
+		_withdraw_tire_response()
 		last_reason = "non-finite aggregate tire state or derived tyre solver value"
 		_clear_state()
 		return
@@ -744,6 +747,7 @@ func finish() -> void:
 		_sample_load.append(load)
 		total += load
 	if not is_finite(total):
+		_withdraw_tire_response()
 		_clear_state()
 		return
 	_load = total
@@ -841,6 +845,8 @@ func _prepare_tire(config) -> void:
 ## `point`: the linear impulse L and the angular impulse (point - x) x L. Only the DIFFERENCE to what was applied before is added to the wheel,
 ## so the impulse follows both the amount and the point of application as the normal rows converge. The ground is static and takes nothing.
 func _apply_tangential_wrench(lambda_x: float, lambda_y: float, point: Vector3) -> void:
+	if _tire_failed:
+		return  # a failed response is terminal for the solve (see _fail_tire_response())
 	var linear: Vector3 = _e_x * lambda_x + _e_y * lambda_y
 	var angular: Vector3 = (point - body_b.position).cross(linear)
 	body_b.linear_velocity += (linear - _applied_linear) * body_b.inverse_mass
@@ -855,11 +861,15 @@ func _apply_tangential_wrench(lambda_x: float, lambda_y: float, point: Vector3) 
 func _solve_tire_iteration() -> void:
 	if tire == null or not tire_forces_enabled or not _axes_valid:
 		return
+	if _tire_failed:
+		return  # terminal for the rest of this solve: no later iteration applies any tangential or rolling-resistance response
 	_update_aggregate()
 	if not _agg_valid:
-		# Zero aggregate load: withdraw whatever this step had applied. A non-finite aggregate is a failure, never a skipped sample.
+		# A non-finite aggregate is a failure, never a skipped sample.
 		if not is_finite(_agg_impulse):
-			_tire_failed = true
+			_fail_tire_response()
+			return
+		# Zero aggregate load: withdraw whatever this step had applied (a valid zero response; the next iteration may find load again).
 		_apply_tangential_wrench(0.0, 0.0, body_b.position)
 		_solve_rolling_resistance(0.0)
 		return
@@ -889,9 +899,7 @@ func _solve_tire_iteration() -> void:
 		target = TireModel.implicit_tangential_impulse(s_x, s_y, ln, _tire_lx, _tire_ly, g00, g01, g10, g11, tire.longitudinal_stiffness,
 				tire.lateral_stiffness, _mu_x, _mu_y, _reference_speed)
 	if not (is_finite(s_x) and is_finite(s_y) and is_finite(g00) and is_finite(g01) and is_finite(g10) and is_finite(g11) and target.is_finite()):
-		_tire_failed = true
-		_apply_tangential_wrench(0.0, 0.0, body_b.position)
-		_solve_rolling_resistance(0.0)
+		_fail_tire_response()
 		return
 	_apply_tangential_wrench(target.x, target.y, _agg_point)
 	_solve_rolling_resistance(ln)
@@ -899,11 +907,44 @@ func _solve_tire_iteration() -> void:
 
 ## Rolling-resistance angular impulse about the axle, a function of the current AGGREGATE normal impulse and the frozen spin; the difference to
 ## what was already applied this step is applied (so it follows the load as the rows converge, and is never warm started). One per wheel.
+## Every derived value is validated BEFORE the wheel is touched: the target, the change to the applied impulse, the angular-velocity change (a
+## Vector3 is float32, so a finite float64 target can still overflow here) and the resulting angular velocity. An invalid value is a tyre failure
+## (_fail_tire_response()), never clamped to zero: a valid zero response (no load, zero spin) is a different thing and stays valid.
 func _solve_rolling_resistance(ln: float) -> void:
+	if _tire_failed:
+		return
 	var target: float = 0.0
 	if ln > 0.0:
 		# TireModel.rolling_resistance_force(v, N, c, v_rr) = -c N psi(v / v_rr); the moment about +u opposes a positive spin.
 		target = -TireModel.rolling_resistance_force(tire.rolling_radius * _spin, ln, tire.rolling_resistance, tire.rolling_resistance_speed) * tire.rolling_radius
 	var delta: float = target - _rolling_impulse
+	var d_omega: Vector3 = body_b.inverse_inertia_world * (_axle * delta)
+	var omega: Vector3 = body_b.angular_velocity + d_omega
+	if not (is_finite(target) and is_finite(delta) and d_omega.is_finite() and omega.is_finite()):
+		_fail_tire_response()
+		return
 	_rolling_impulse = target
-	body_b.angular_velocity += body_b.inverse_inertia_world * (_axle * delta)
+	body_b.angular_velocity = omega
+
+
+## The ONE tyre-failure path. The tyre response of this solve is marked failed (TERMINAL until the next prepare() or a clear: every later iteration
+## returns before applying anything) and whatever it has applied to the wheel is withdrawn, so the wheel is left as the normal rows alone made it.
+func _fail_tire_response() -> void:
+	_tire_failed = true
+	_withdraw_tire_response()
+
+
+## Removes from the wheel the tangential wrench and the rolling-resistance moment that this solve has applied, using the bookkeeping that recorded
+## them (the exact inverse of what _apply_tangential_wrench() and _solve_rolling_resistance() added), then zeroes that bookkeeping. A record that
+## is not finite was never applied (both response paths validate before they apply) and is dropped without touching the wheel.
+func _withdraw_tire_response() -> void:
+	if _applied_linear.is_finite() and _applied_angular.is_finite():
+		body_b.linear_velocity -= _applied_linear * body_b.inverse_mass
+		body_b.angular_velocity -= body_b.inverse_inertia_world * _applied_angular
+	if is_finite(_rolling_impulse):
+		body_b.angular_velocity -= body_b.inverse_inertia_world * (_axle * _rolling_impulse)
+	_applied_linear = Vector3.ZERO
+	_applied_angular = Vector3.ZERO
+	_tire_lx = 0.0
+	_tire_ly = 0.0
+	_rolling_impulse = 0.0

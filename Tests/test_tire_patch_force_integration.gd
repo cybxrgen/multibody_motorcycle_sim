@@ -981,3 +981,189 @@ func test_h_a_driven_wheel_on_a_hub_fixture_stays_finite_inside_the_ellipse_and_
 	var balance: float = s.longitudinal_force() * lever + s.rolling_resistance_torque()
 	check_near(balance, torque, 0.03 * torque, "steady axle torque balance: F_x * lever + M_rr = drive torque (%s)" % balance)
 	check(s.longitudinal_force() > 100.0 and s.longitudinal_force() < MU_S * s.normal_load(), "driving force forward and below the friction limit (%s N)" % s.longitudinal_force())
+
+
+# ---------------------------------------------------------------- I: tyre failure handling (review corrections of Stage C)
+##
+## Two properties of the tyre response of one solve, checked through prepare() / solve_iteration() / finish() exactly as ConstraintSolver drives them.
+## (1) Every derived rolling-resistance value is validated BEFORE any angular velocity changes; an invalid value is a tyre failure (never a skipped
+## sample, never a silent zero, never a NaN angular impulse on the wheel). (2) A tyre failure is terminal for the rest of that solve: no later
+## iteration may apply a tangential or rolling-resistance impulse that finish() would then hide by clearing the bookkeeping.
+## The oracle is a TWIN of the same rig with tire_forces_enabled = false (bit-identical to Stage B, tested above): while the tyre has failed, the
+## wheel must follow the twin, which has only the normal rows. The tyre response of the fixtures is of order 0.1 m/s and 0.1 rad/s per iteration,
+## so a tolerance of 1e-5 relative (float32 rounding of the apply-then-withdraw sequence, ~1e-7) cannot hide a resumed response.
+
+## {p: linear momentum (kg m/s), l: angular momentum about the centre of mass (kg m^2/s)} of the wheel.
+func wheel_momenta(wheel: SimRigidBody) -> Dictionary:
+	return {"p": wheel.linear_velocity / wheel.inverse_mass, "l": wheel.inverse_inertia_world.inverse() * wheel.angular_velocity}
+
+
+## The wheel's momenta equal those of the tyre-less twin (the tyre contributes nothing) within 1e-5 relative.
+func check_wheel_equals_twin(wheel: SimRigidBody, twin: SimRigidBody, message: String) -> void:
+	var a: Dictionary = wheel_momenta(wheel)
+	var b: Dictionary = wheel_momenta(twin)
+	check(wheel.linear_velocity.is_finite() and wheel.angular_velocity.is_finite(), "%s: the wheel state is finite" % message)
+	check_vec3_near(a["p"], b["p"], 1.0e-5 * (b["p"].length() + 1.0), "%s: linear momentum equals the tyre-less twin" % message)
+	check_vec3_near(a["l"], b["l"], 1.0e-5 * (b["l"].length() + 1.0), "%s: angular momentum equals the tyre-less twin" % message)
+
+
+## No tyre state of any kind is left (queries of the patch).
+func check_no_tire_state(s, message: String) -> void:
+	check(s.longitudinal_force() == 0.0 and s.lateral_force() == 0.0 and s.rolling_resistance_torque() == 0.0, "%s: no tyre force or rolling moment" % message)
+	check(s.tangential_force_world() == Vector3.ZERO and s.tangential_moment_world() == Vector3.ZERO and s.carried_tire_impulse() == Vector3.ZERO, "%s: no applied or carried wrench" % message)
+
+
+func test_i_a_non_finite_rolling_resistance_is_a_tyre_failure_and_never_reaches_the_wheel() -> void:
+	var base: Dictionary = {"height": R - DELTA, "forward_speed": 6.0}
+	# Both cases use a VALID tyre specification and finite state; only the derived rolling-resistance quantities overflow.
+	# A: rolling_resistance_speed 1e-306 with a 1e4 rad/s spin: x = v / v_rr = 3e309 overflows to INF and x / sqrt(1 + x x) is NaN.
+	# B: grip 1e40 allows c_rr 1e39: the float64 target ~1e39 is finite but exceeds the float32 range of the angular-velocity update (3.4e38).
+	var cases: Array = [
+		{"name": "NaN target", "spin": 1.0e4, "spec": {"rolling_resistance_speed": 1.0e-306}, "fixed": {"rolling_resistance_speed": 0.2}, "target_finite": false},
+		{"name": "target beyond the float32 range", "spin": 30.0, "spec": {"grip_longitudinal": 1.0e40, "rolling_resistance": 1.0e39},
+			"fixed": {"grip_longitudinal": 1.0, "rolling_resistance": 0.015}, "target_finite": true},
+	]
+	for c in cases:
+		var name: String = c["name"]
+		var opts: Dictionary = base.duplicate()
+		opts["spin"] = c["spin"]
+		opts["spec_overrides"] = c["spec"]
+		var rig: Dictionary = make_rig(opts)
+		var twin_opts: Dictionary = opts.duplicate()
+		var twin: Dictionary = make_rig(twin_opts)
+		twin["support"].tire_forces_enabled = false
+		var s = rig["support"]
+		var wheel: SimRigidBody = rig["wheel"]
+		var config = rig["world"].config
+		s.prepare(DT, config)
+		twin["support"].prepare(DT, twin["world"].config)
+		s.solve_iteration()
+		twin["support"].solve_iteration()
+		# Fixture honesty: the rolling-resistance law at the aggregate load of this iteration really gives the quantity named in the case.
+		var ln: float = s.aggregate_normal_impulse()
+		check(ln > 0.0, "%s: fixture: the patch carries load" % name)
+		var target: float = -TireModel.rolling_resistance_force(s.tire.rolling_radius * c["spin"], ln, s.tire.rolling_resistance, s.tire.rolling_resistance_speed) * s.tire.rolling_radius
+		if c["target_finite"]:
+			check(is_finite(target) and absf(target) > 3.4e38, "%s: fixture: finite float64 target %s beyond float32" % [name, target])
+		else:
+			check(not is_finite(target), "%s: fixture: the target is not finite (%s)" % [name, target])
+		# The failure is detected in THIS iteration, before the wheel is touched: the wheel equals the tyre-less twin and nothing is left applied.
+		check(s._tire_failed, "%s: the failure is detected in the iteration that derives the value" % name)
+		check_wheel_equals_twin(wheel, twin["wheel"], "%s after the failing iteration" % name)
+		check_no_tire_state(s, "%s after the failing iteration" % name)
+		# The failure is terminal for the rest of the solve (see the next test); the wheel stays finite and equal to the twin.
+		for i in 3:
+			s.solve_iteration()
+			twin["support"].solve_iteration()
+			check_wheel_equals_twin(wheel, twin["wheel"], "%s, later iteration %d" % [name, i])
+		s.finish()
+		twin["support"].finish()
+		check(not s.contact_active and s.last_reason.contains("non-finite"), "%s: the patch reports the failure (%s)" % [name, s.last_reason])
+		check_no_tire_state(s, "%s after finish" % name)
+		check(s.effective_contact_point() == Vector3.ZERO and s.aggregate_normal_load() == 0.0, "%s: no stale aggregate" % name)
+		check_wheel_equals_twin(wheel, twin["wheel"], "%s after finish" % name)
+		# Recovery: with valid tyre values the next solve (the next prepare) works again and equals a cold solve of a fresh rig from the same state.
+		for key in c["fixed"]:
+			s.tire.set(key, c["fixed"][key])
+		var good: Dictionary = {"height": R - DELTA, "forward_speed": 6.0, "spin": 30.0}
+		var fresh: Dictionary = make_rig(good)
+		solve_in_place(fresh)
+		wheel.linear_velocity = rig["e_x"] * 6.0
+		wheel.angular_velocity = -rig["u"] * 30.0
+		solve_in_place(rig)
+		check(s.contact_active and s.last_reason == "", "%s: a later valid solve is accepted (%s)" % [name, s.last_reason])
+		check(absf(s.longitudinal_force()) > 1.0 and s.rolling_resistance_torque() != 0.0, "%s: and the tyre acts again" % name)
+		check_near(s.longitudinal_force(), fresh["support"].longitudinal_force(), 1.0e-5 * (absf(fresh["support"].longitudinal_force()) + 1.0), "%s: recovered longitudinal force equals a cold solve" % name)
+		check_near(s.rolling_resistance_torque(), fresh["support"].rolling_resistance_torque(), 1.0e-5 * (absf(fresh["support"].rolling_resistance_torque()) + 1.0e-3), "%s: recovered rolling moment equals a cold solve" % name)
+		check_vec3_near(wheel.angular_velocity, fresh["wheel"].angular_velocity, 1.0e-5 * (fresh["wheel"].angular_velocity.length() + 1.0), "%s: recovered wheel spin equals a cold solve" % name)
+
+
+func test_i_b_a_failed_tyre_response_stays_failed_for_the_rest_of_the_solve_and_recovers_in_the_next() -> void:
+	# Valid solve; the tyre fails in the FIRST iteration only (tyre rolling radius infinite for that iteration: the slip velocity is not finite, which the
+	# tangential response detects and withdraws exactly as before the correction); the cause is gone from the second iteration on. The reviewed defect:
+	# iteration 2 then applied a new tangential and rolling-resistance impulse that finish() hid by clearing the bookkeeping.
+	for mode in ["finish", "reset"]:
+		var opts: Dictionary = {"height": R - DELTA, "forward_speed": 6.0, "spin": 5.0}
+		var rig: Dictionary = make_rig(opts)
+		var twin: Dictionary = make_rig(opts)
+		twin["support"].tire_forces_enabled = false
+		var s = rig["support"]
+		var wheel: SimRigidBody = rig["wheel"]
+		var start: Dictionary = {"v": wheel.linear_velocity, "w": wheel.angular_velocity}
+		s.prepare(DT, rig["world"].config)
+		twin["support"].prepare(DT, twin["world"].config)
+		# Fixture honesty: without the fault the tyre response of iteration 2 is far above the tolerance (0.1 m/s class, measured 0.16 m/s).
+		var healthy: Dictionary = make_rig(opts)
+		healthy["support"].prepare(DT, healthy["world"].config)
+		healthy["support"].solve_iteration()
+		healthy["support"].solve_iteration()
+		var reference: Dictionary = make_rig(opts)
+		reference["support"].tire_forces_enabled = false
+		reference["support"].prepare(DT, reference["world"].config)
+		reference["support"].solve_iteration()
+		reference["support"].solve_iteration()
+		check((healthy["wheel"].linear_velocity - reference["wheel"].linear_velocity).length() > 0.05, "fixture: a working tyre changes the wheel velocity by > 0.05 m/s within two iterations")
+		var good_radius: float = s.tire.rolling_radius
+		s.tire.rolling_radius = INF
+		s.solve_iteration()
+		s.tire.rolling_radius = good_radius
+		twin["support"].solve_iteration()
+		check(s._tire_failed, "%s: the first iteration fails" % mode)
+		check_wheel_equals_twin(wheel, twin["wheel"], "%s: after the failing iteration (the response is withdrawn)" % mode)
+		# The world keeps iterating: no later iteration may apply any tyre wrench, tangential or rolling.
+		for i in 6:
+			s.solve_iteration()
+			twin["support"].solve_iteration()
+			check_wheel_equals_twin(wheel, twin["wheel"], "%s: iteration %d after the failure" % [mode, i + 2])
+			check_no_tire_state(s, "%s: iteration %d after the failure" % [mode, i + 2])
+		if mode == "finish":
+			s.finish()
+			twin["support"].finish()
+			check(not s.contact_active and s.last_reason.contains("non-finite"), "finish: the patch reports the failure (%s)" % s.last_reason)
+			# Physical state and bookkeeping agree: the wheel carries only what the normal rows gave it; nothing tyre-related is recorded or hidden.
+			check_wheel_equals_twin(wheel, twin["wheel"], "finish: final physical state")
+		else:
+			# SimWorld's aborted-step path: reset_warm_start() discards the solve; a failure is not carried into the next one.
+			s.reset_warm_start()
+			check(not s.contact_active, "reset: the patch is inactive")
+		check_no_tire_state(s, "%s: final bookkeeping" % mode)
+		check(not s._tire_failed, "%s: the failure flag does not outlive the solve" % mode)
+		# Recovery: the same patch, valid tyre, the same start state: a new solve applies the tyre again and equals a cold solve of a fresh rig.
+		wheel.linear_velocity = start["v"]
+		wheel.angular_velocity = start["w"]
+		var fresh: Dictionary = make_rig(opts)
+		solve_in_place(fresh)
+		var tyre_free: Dictionary = make_rig(opts)
+		tyre_free["support"].tire_forces_enabled = false
+		solve_in_place(tyre_free)
+		solve_in_place(rig)
+		check(s.contact_active and s.last_reason == "" and not s._tire_failed, "%s: the next valid solve is accepted" % mode)
+		check((wheel.linear_velocity - tyre_free["wheel"].linear_velocity).length() > 0.05, "%s: and the tyre changes the wheel velocity again (by %s m/s)" % [mode, (wheel.linear_velocity - tyre_free["wheel"].linear_velocity).length()])
+		check_near(s.longitudinal_force(), fresh["support"].longitudinal_force(), 1.0e-5 * (absf(fresh["support"].longitudinal_force()) + 1.0), "%s: recovered longitudinal force equals a cold solve" % mode)
+		check_vec3_near(wheel.linear_velocity, fresh["wheel"].linear_velocity, 1.0e-5 * (fresh["wheel"].linear_velocity.length() + 1.0), "%s: recovered wheel velocity equals a cold solve" % mode)
+
+
+func test_i_c_finish_never_clears_the_record_of_a_response_that_the_wheel_still_carries() -> void:
+	# finish() has two paths that discard the tyre bookkeeping: a failed tyre response and a non-finite aggregate load. Neither may leave the impulse
+	# in the wheel while its record is gone. One iteration only, so the normal rows of the patch and of the tyre-less twin are still identical and
+	# the withdrawn wheel can be compared with the twin exactly (float32 rounding of apply-then-withdraw).
+	for path in ["failed flag", "non-finite load"]:
+		var opts: Dictionary = {"height": R - DELTA, "forward_speed": 6.0, "spin": 5.0}
+		var rig: Dictionary = make_rig(opts)
+		var twin: Dictionary = make_rig(opts)
+		twin["support"].tire_forces_enabled = false
+		var s = rig["support"]
+		s.prepare(DT, rig["world"].config)
+		twin["support"].prepare(DT, twin["world"].config)
+		s.solve_iteration()
+		twin["support"].solve_iteration()
+		check((rig["wheel"].linear_velocity - twin["wheel"].linear_velocity).length() > 0.05 and s.rolling_resistance_torque() != 0.0, "%s: fixture: the tyre response is applied to the wheel" % path)
+		if path == "failed flag":
+			s._tire_failed = true
+		else:
+			prescribe(s, func(_p: Vector3) -> float: return NAN)
+		s.finish()
+		twin["support"].finish()
+		check(not s.contact_active, "%s: the patch is inactive" % path)
+		check_no_tire_state(s, "%s: the record is cleared" % path)
+		check_wheel_equals_twin(rig["wheel"], twin["wheel"], "%s: and the wheel no longer carries the response" % path)
