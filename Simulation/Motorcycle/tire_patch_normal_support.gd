@@ -847,10 +847,31 @@ func _prepare_tire(config) -> void:
 func _apply_tangential_wrench(lambda_x: float, lambda_y: float, point: Vector3) -> void:
 	if _tire_failed:
 		return  # a failed response is terminal for the solve (see _fail_tire_response())
-	var linear: Vector3 = _e_x * lambda_x + _e_y * lambda_y
-	var angular: Vector3 = (point - body_b.position).cross(linear)
-	body_b.linear_velocity += (linear - _applied_linear) * body_b.inverse_mass
-	body_b.angular_velocity += body_b.inverse_inertia_world * (angular - _applied_angular)
+	# Validate-then-apply: every candidate is derived first and the wheel and the bookkeeping are touched only when ALL of them are finite. Finite
+	# scalar impulses can still overflow here (a Vector3 is float32), so the derived impulses, their changes, the velocity changes and the resulting
+	# velocities are checked, not just the inputs. An invalid candidate is a tyre failure (never clamped to zero, never half applied); a valid zero
+	# response is finite and passes. The record is therefore always finite, which _withdraw_tire_response() relies on.
+	var valid: bool = is_finite(lambda_x) and is_finite(lambda_y) and point.is_finite()
+	var linear: Vector3 = Vector3.ZERO
+	var angular: Vector3 = Vector3.ZERO
+	var velocity: Vector3 = Vector3.ZERO
+	var spin: Vector3 = Vector3.ZERO
+	if valid:
+		linear = _e_x * lambda_x + _e_y * lambda_y
+		angular = (point - body_b.position).cross(linear)
+		var d_linear: Vector3 = linear - _applied_linear
+		var d_angular: Vector3 = angular - _applied_angular
+		var d_velocity: Vector3 = d_linear * body_b.inverse_mass
+		var d_spin: Vector3 = body_b.inverse_inertia_world * d_angular
+		velocity = body_b.linear_velocity + d_velocity
+		spin = body_b.angular_velocity + d_spin
+		valid = (linear.is_finite() and angular.is_finite() and d_linear.is_finite() and d_angular.is_finite() and d_velocity.is_finite()
+				and d_spin.is_finite() and velocity.is_finite() and spin.is_finite())
+	if not valid:
+		_fail_tire_response()
+		return
+	body_b.linear_velocity = velocity
+	body_b.angular_velocity = spin
 	_applied_linear = linear
 	_applied_angular = angular
 	_tire_lx = lambda_x
@@ -876,6 +897,8 @@ func _solve_tire_iteration() -> void:
 	var ln: float = _agg_impulse
 	# Re-seat the carried tangential impulse at the CURRENT effective point before the slip is measured.
 	_apply_tangential_wrench(_tire_lx, _tire_ly, _agg_point)
+	if _tire_failed:
+		return  # the re-seat itself can fail (see _apply_tangential_wrench())
 	var r: Vector3 = _agg_point - body_b.position
 	var v_c: Vector3 = body_b.linear_velocity + body_b.angular_velocity.cross(r)
 	var rr_offset: float = tire.rolling_radius - wheel_radius
