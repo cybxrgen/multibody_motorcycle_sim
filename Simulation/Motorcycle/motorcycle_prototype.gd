@@ -42,6 +42,8 @@ const TireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 const CollisionBox = preload("res://Simulation/Motorcycle/motorcycle_collision_box.gd")
 const ControlSpec = preload("res://Simulation/Motorcycle/motorcycle_control_spec.gd")
+const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
+const TirePatchSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_patch_spec.gd")
 
 ## ---- Estimated mass distribution (M2.5.2; ESTIMATES, not measured data, not a calibrated or real motorcycle) ----
 ## Category assumed: a middleweight (about 600 cc class) standard / naked road motorcycle, WITHOUT rider, luggage and fuel but with oil and
@@ -138,6 +140,36 @@ static func config_with_collision() -> MotorcycleConfig:
 	c.fork_slider_box = CollisionBox.new("fork_slider", c.fork_slider.visual_size, Vector3.ZERO, Quaternion.IDENTITY, BOX_FRICTION)
 	c.swingarm_box = CollisionBox.new("swingarm", c.swingarm.visual_size, Vector3.ZERO, Quaternion.IDENTITY, BOX_FRICTION)
 	c.controls = ControlSpec.new(MAX_DRIVE_TORQUE, MAX_FRONT_BRAKE_TORQUE, MAX_REAR_BRAKE_TORQUE, MAX_STEERING_RATE, MAX_STEERING_TORQUE, STEERING_LIMIT)
+	return c
+
+
+## ---- Distributed contact patches (M2.5.3 Stage D, illustrative, NOT measured) ----
+## Tread sections (full width, crown radius) of the two prototype tyres: 120 mm / 70 mm front, 180 mm / 100 mm rear. Grid and compliance of the patch:
+## 9 x 48 samples, k_A = 4e6 N/m^3, c_A = 1e5 N s/m^3, bottoming at 50 mm; the values the Stage B/C tests use, not tuned against any result.
+const FRONT_TIRE_WIDTH: float = 0.12
+const FRONT_TIRE_CROWN_RADIUS: float = 0.07
+const REAR_TIRE_WIDTH: float = 0.18
+const REAR_TIRE_CROWN_RADIUS: float = 0.10
+const PATCH_LATERAL_COUNT: int = 9
+const PATCH_CIRCUMFERENTIAL_COUNT: int = 48
+const PATCH_STIFFNESS_DENSITY: float = 4.0e6
+const PATCH_DAMPING_DENSITY: float = 1.0e5
+const PATCH_MAX_COMPRESSION: float = 0.05
+
+
+## One prototype patch specification (a fresh object each call).
+static func patch_spec() -> TirePatchSpec:
+	return TirePatchSpec.new(PATCH_LATERAL_COUNT, PATCH_CIRCUMFERENTIAL_COUNT, PATCH_STIFFNESS_DENSITY, PATCH_DAMPING_DENSITY, PATCH_MAX_COMPRESSION)
+
+
+## The collision configuration with the finite-width tyre geometry and ONE distributed contact patch per wheel (M2.5.3 Stage D): the wheels carry
+## TirePatchNormalSupport instead of the one-point contact. A fresh configuration each call.
+static func config_with_patches() -> MotorcycleConfig:
+	var c: MotorcycleConfig = config_with_collision()
+	c.front_tire_geometry = TireGeometry.new(FRONT_TIRE_WIDTH, FRONT_TIRE_CROWN_RADIUS)
+	c.rear_tire_geometry = TireGeometry.new(REAR_TIRE_WIDTH, REAR_TIRE_CROWN_RADIUS)
+	c.front_tire_patch = patch_spec()
+	c.rear_tire_patch = patch_spec()
 	return c
 
 

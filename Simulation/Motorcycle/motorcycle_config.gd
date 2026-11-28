@@ -31,6 +31,7 @@ const CollisionBox = preload("res://Simulation/Motorcycle/motorcycle_collision_b
 const ControlSpec = preload("res://Simulation/Motorcycle/motorcycle_control_spec.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
+const TirePatchSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_patch_spec.gd")
 const RearSuspension = preload("res://Simulation/Motorcycle/rear_suspension.gd")
 const SimMassProperties = preload("res://Simulation/Core/sim_mass_properties.gd")
 const HingeJoint = preload("res://Simulation/Solver/hinge_joint_constraint.gd")
@@ -82,6 +83,13 @@ var rear_tire: TireSpec = null
 ## independent of the wheel widths below (visual / inertia dimensions). Rules: TireGeometry.validate (single home).
 var front_tire_geometry: TireGeometry = null
 var rear_tire_geometry: TireGeometry = null
+## Optional distributed contact patch of each wheel (M2.5.3 Stage D); null (the default) keeps that wheel on the one-point TireGroundContact
+## (or the generic contact). A wheel with a patch specification is built with ONE TirePatchNormalSupport that replaces the one-point contact
+## (never both) and is the sole owner of the wheel's normal support, tangential response and rolling resistance; it therefore needs a ground
+## with friction > 0, the wheel's tyre (M2.4.2) and the wheel's finite-width geometry (M2.5.1). Front and rear are independent objects.
+## Rules: MotorcycleTireSpec.validate / TireGeometry.validate / MotorcycleTirePatchSpec.validate (single homes) plus _check_tire_patches.
+var front_tire_patch: TirePatchSpec = null
+var rear_tire_patch: TirePatchSpec = null
 
 ## Optional PHYSICAL oriented-box collision geometry of the four structural bodies (M2.5.2); null (the default) = that body has no collision
 ## geometry. Independent of `visual_size` (presentation) and of the tyre geometry. The wheels have none: tyre contact is their sole ground
@@ -184,6 +192,7 @@ func validate() -> PackedStringArray:
 	_check_ground(errors)
 	_check_tires(errors)
 	_check_tire_geometry(errors)
+	_check_tire_patches(errors)
 	_check_collision_boxes(errors)
 	if controls != null:
 		errors.append_array(controls.validate())
@@ -318,6 +327,27 @@ func _check_tire_geometry(errors: PackedStringArray) -> void:
 		if pair[0] != null:
 			for message in pair[0].validate(pair[1] if is_finite(pair[1]) else 0.0):
 				errors.append("%s %s" % [pair[2], message])
+
+
+## Distributed contact-patch rules (M2.5.3 Stage D): a patch needs a ground (friction > 0, the ellipse limits scale with it), the wheel's tyre and the
+## wheel's tyre geometry; the two specifications are distinct objects and each satisfies MotorcycleTirePatchSpec.validate against its wheel radius.
+func _check_tire_patches(errors: PackedStringArray) -> void:
+	if front_tire_patch != null and front_tire_patch == rear_tire_patch:
+		errors.append("tire patch: the front and rear patch must be independent specification objects")
+	for entry in [[front_tire_patch, front_tire, front_tire_geometry, front_wheel_radius, "front"], [rear_tire_patch, rear_tire, rear_tire_geometry, rear_wheel_radius, "rear"]]:
+		var patch = entry[0]
+		if patch == null:
+			continue
+		if ground == null:
+			errors.append("%s tire patch: a patch requires a ground" % entry[4])
+		elif not (is_finite(ground.friction) and ground.friction > 0.0):
+			errors.append("%s tire patch: the ground friction must be > 0 (got %s)" % [entry[4], ground.friction])
+		if entry[1] == null:
+			errors.append("%s tire patch: a patch requires the wheel's tyre specification (it owns the tangential response)" % entry[4])
+		if entry[2] == null:
+			errors.append("%s tire patch: a patch requires the wheel's tyre geometry" % entry[4])
+		for message in patch.validate(entry[3] if is_finite(entry[3]) else 0.0):
+			errors.append("%s %s" % [entry[4], message])
 
 
 ## Collision-box rules (M2.5.2): every configured box is valid, names the body of its slot (so a wheel or another body can never be its owner),

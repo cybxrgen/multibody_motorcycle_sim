@@ -40,6 +40,7 @@ const SimulationRenderer = preload("res://Simulation/Presentation/simulation_ren
 const SimulationDebug = preload("res://Simulation/Debug/simulation_debug.gd")
 const TireModel = preload("res://Simulation/Motorcycle/tire_model.gd")
 const GeometryWireframe = preload("res://Simulation/Debug/geometry_wireframe.gd")
+const TirePatchDebug = preload("res://Simulation/Debug/tire_patch_debug.gd")
 
 ## Keyboard state -> normalized control inputs (throttle, brake, steering). Pure function of the pressed keys so it can be tested; physics code
 ## never polls the keyboard. `is_down` is a Callable(int keycode) -> bool. Steering: +1 = steer LEFT (the positive steering-hinge angle).
@@ -59,6 +60,7 @@ var assembly = null
 var renderer: SimulationRenderer = SimulationRenderer.new()
 var debug_overlay: SimulationDebug = SimulationDebug.new()
 var wireframe: GeometryWireframe = GeometryWireframe.new()
+var patch_view: TirePatchDebug = TirePatchDebug.new()
 var paused: bool = false
 
 var _camera: Camera3D = Camera3D.new()
@@ -74,6 +76,7 @@ func _ready() -> void:
 	add_child(renderer)
 	add_child(debug_overlay)
 	add_child(wireframe)
+	add_child(patch_view)
 	add_child(_camera)
 	var light: DirectionalLight3D = DirectionalLight3D.new()
 	light.rotation_degrees = Vector3(-50, -30, 0)
@@ -99,9 +102,9 @@ func _build_scenario() -> void:
 		marker.queue_free()
 	_markers.clear()
 	world = SimWorld.new()  # default SimConfig: gravity (0, -9.81, 0)
-	var config = MotorcyclePrototype.config_with_collision()
-	config.front_tire_geometry = TireGeometry.new(0.12, 0.07)  # illustrative tread sections, drawn by the G wireframe (geometry only)
-	config.rear_tire_geometry = TireGeometry.new(0.18, 0.10)
+	# M2.5.3 Stage D: the wheels carry one distributed contact patch each (illustrative tread sections and patch parameters of the prototype);
+	# the tyre surfaces are drawn by the G wireframe, the patches' candidate / active samples by the P view.
+	var config = MotorcyclePrototype.config_with_patches()
 	assembly = MotorcycleBuilder.build(config, world)
 	if assembly == null:
 		push_error("motorcycle_test: the assembly could not be built.")
@@ -109,6 +112,7 @@ func _build_scenario() -> void:
 	renderer.world = world
 	debug_overlay.world = world
 	wireframe.setup(assembly)
+	patch_view.setup(assembly)
 
 	renderer.add_box(assembly.chassis, config.chassis.visual_size, Color(0.45, 0.55, 0.75))
 	renderer.add_box(assembly.steering, config.steering.visual_size, Color(0.95, 0.55, 0.15))
@@ -157,10 +161,11 @@ func _process(delta: float) -> void:
 	renderer.render(alpha)
 	debug_overlay.update_overlay(alpha)
 	wireframe.update_wireframe(alpha)
+	patch_view.update_patch_view(alpha)
 	_update_contact_markers(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] collision-box + tyre wireframe: %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching, orange = separated." % [
+	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] collision-box + tyre wireframe: %s  [P] contact-patch samples (candidates dim, active bright, tick length = relative normal support; front cyan, rear orange): %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching, orange = separated." % [
 		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(), _box_contact_report(),
-		"ON" if wireframe.enabled else "off", assembly.controls.throttle, assembly.controls.spec.max_drive_torque, assembly.controls.brake,
+		"ON" if wireframe.enabled else "off", "ON" if patch_view.enabled else "off", assembly.controls.throttle, assembly.controls.spec.max_drive_torque, assembly.controls.brake,
 		assembly.controls.spec.max_front_brake_torque, assembly.controls.spec.max_rear_brake_torque, assembly.controls.steering,
 		assembly.controls.spec.max_steering_rate, assembly.controls.spec.max_steering_torque, assembly.controls.spec.steering_limit]
 
@@ -213,7 +218,7 @@ func _update_contact_markers(alpha: float) -> void:
 ## the rolling-resistance moment (last solved step, read-only queries of the solver's results), and the slips evaluated from the PUBLISHED
 ## state with TireModel.slip (read-only). Nothing is written.
 func _contact_report() -> String:
-	var text: String = "tyre contacts (surface mu = %.2f, illustrative tyre parameters):" % assembly.front_wheel_contact.friction
+	var text: String = "tyre contacts (surface mu = %.2f, illustrative tyre parameters):" % (assembly.front_tire_patch.surface_friction if assembly.front_tire_patch != null else assembly.front_wheel_contact.friction)
 	var names: Array = ["front", "rear"]
 	var contacts: Array = assembly.ground_contacts()
 	for k in contacts.size():
@@ -279,6 +284,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				debug_overlay.show_anchors = not debug_overlay.show_anchors
 			KEY_G:
 				wireframe.toggle()
+			KEY_P:
+				patch_view.toggle()
 	elif event is InputEventMouseMotion and (event.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
 		_yaw -= event.relative.x * 0.005
 		_pitch = clampf(_pitch - event.relative.y * 0.005, -1.5, 1.5)
