@@ -13,6 +13,9 @@ extends RefCounted
 ## same way (PrismaticJointConstraint.from_world with the fork axis and a world reference direction): zero lateral error, zero
 ## axis error, zero twist and translation 0 at the reference pose. The suspension seats are converted from world points too.
 ##
+## Ground contacts (M2.4.1 / M2.4.2 / M2.5.3 Stage D): per wheel exactly ONE of a distributed TirePatchNormalSupport (the wheel has a patch specification), a one-point
+## TireGroundContact (a tyre) or a WheelGroundContact; a patch wheel never also gets a one-point contact.
+##
 ## Failure policy (identical to SimWorld.add_body / add_constraint / add_force_provider / the from_world factories): build() returns
 ## null and reports the reason with push_error. The complete configuration is validated before anything is registered. Nothing
 ## partial survives: if anything fails after the first registration, exactly the bodies, constraints and force provider this call
@@ -30,8 +33,16 @@ const MotorcycleConfig = preload("res://Simulation/Motorcycle/motorcycle_config.
 const MotorcycleAssembly = preload("res://Simulation/Motorcycle/motorcycle_assembly.gd")
 const WheelGroundContact = preload("res://Simulation/Motorcycle/wheel_ground_contact.gd")
 const TireGroundContact = preload("res://Simulation/Motorcycle/tire_ground_contact.gd")
+const TirePatchNormalSupport = preload("res://Simulation/Motorcycle/tire_patch_normal_support.gd")
 const BoxGroundContact = preload("res://Simulation/Motorcycle/box_ground_contact.gd")
 const MotorcycleControls = preload("res://Simulation/Motorcycle/motorcycle_controls.gd")
+
+## TEST SEAM (M2.5.3 Stage D, empty by default = the real TirePatchNormalSupport.create_with_tire). When valid, build() calls it instead of
+## create_with_tire to construct a wheel's patch, with the SAME arguments preceded by the side name ("front" / "rear"):
+##   factory.call(side, ground, wheel, geometry, wheel_radius, plane_point, plane_normal, patch_spec, tire_spec, surface_friction)
+## and treats a null result exactly like a refused construction. After the configuration was validated no honest input can make the real
+## factory fail, so the transactional rollback of a failed patch construction can only be exercised through this seam. Production code never sets it.
+static var wheel_patch_factory: Callable = Callable()
 
 ## Construction self-check: world anchors of a hinge must agree within this distance. Pivot coordinates of order 1 m carry
 ## float32 rounding of ~1e-7 m per operation (local = R^-1 (P - x), world = x + R local: a few operations), so honest
@@ -141,7 +152,18 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 	added_providers.append(rear_suspension)
 	assembly.rear_suspension = rear_suspension
 
-	# 3c. Optional ground (M2.4.1): one static body and one WheelGroundContact per wheel (ground = body A, wheel = body B).
+	# 3c. Finite-width tyre geometry (M2.5.1): validated with the configuration above; stored as independent copies. Made BEFORE the wheel
+	# contacts because a wheel's distributed patch (3d) reads this very object, like the wireframe (one geometry owner per wheel).
+	if config.front_tire_geometry != null:
+		assembly.front_tire_geometry = config.front_tire_geometry.duplicate_spec()
+	if config.rear_tire_geometry != null:
+		assembly.rear_tire_geometry = config.rear_tire_geometry.duplicate_spec()
+
+	# 3d. Optional ground (M2.4.1): one static body and ONE ground contact per wheel (ground = body A, wheel = body B). A wheel with a patch
+	# specification (M2.5.3 Stage D) gets a distributed TirePatchNormalSupport, which is its only ground contact: no one-point contact is created
+	# next to it, and the patch is the sole owner of the normal support, the tangential response and the rolling resistance. A wheel with a tyre
+	# but no patch keeps the one-point TireGroundContact (the tyre model owns the tangential response; the tyre is copied so later edits of the
+	# configuration do not reach the simulation), a wheel without a tyre the generic M2.4.1 WheelGroundContact.
 	if config.ground != null:
 		var ground_spec = config.ground
 		var ground_body: SimRigidBody = SimRigidBody.new(SimMassProperties.new(0.0), ground_spec.point, Quaternion.IDENTITY)
@@ -150,13 +172,15 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 			return _fail(target, added_bodies, added_constraints, added_providers, "SimWorld refused the ground body")
 		added_bodies.append(ground_body)
 		assembly.ground = ground_body
-		var wheel_links: Array = [[assembly.front_wheel, config.front_wheel_radius, "front", config.front_tire], [assembly.rear_wheel, config.rear_wheel_radius, "rear", config.rear_tire]]
+		var wheel_links: Array = [
+			[assembly.front_wheel, config.front_wheel_radius, "front", config.front_tire, config.front_tire_patch, assembly.front_tire_geometry],
+			[assembly.rear_wheel, config.rear_wheel_radius, "rear", config.rear_tire, config.rear_tire_patch, assembly.rear_tire_geometry]]
 		var contacts: Array = []
 		for link in wheel_links:
-			# M2.4.2: a wheel with a tyre gets a TireGroundContact (the tyre model owns the tangential response; the tyre is copied so
-			# later edits of the configuration do not reach the simulation), otherwise the generic M2.4.1 WheelGroundContact.
 			var contact = null
-			if link[3] != null:
+			if link[4] != null:
+				contact = _create_wheel_patch(link[2], ground_body, link[0], link[5], link[1], ground_spec, link[4], link[3])
+			elif link[3] != null:
 				contact = TireGroundContact.create_with_tire(ground_body, link[0], link[1], ground_spec.point, ground_spec.normal, ground_spec.friction, link[3].duplicate_spec(), ground_spec.activation_distance)
 			else:
 				contact = WheelGroundContact.create(ground_body, link[0], link[1], ground_spec.point, ground_spec.normal, ground_spec.friction, ground_spec.activation_distance)
@@ -172,12 +196,10 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 			assembly.front_tire = contacts[0]
 		if config.rear_tire != null:
 			assembly.rear_tire = contacts[1]
-
-	# 3d. Finite-width tyre geometry (M2.5.1): validated with the configuration above; stored as independent copies, not yet used by the contacts.
-	if config.front_tire_geometry != null:
-		assembly.front_tire_geometry = config.front_tire_geometry.duplicate_spec()
-	if config.rear_tire_geometry != null:
-		assembly.rear_tire_geometry = config.rear_tire_geometry.duplicate_spec()
+		if config.front_tire_patch != null:
+			assembly.front_tire_patch = contacts[0]
+		if config.rear_tire_patch != null:
+			assembly.rear_tire_patch = contacts[1]
 
 	# 3e. Physical collision boxes (M2.5.2): independent copies stored in the assembly. With a ground, eight corner contacts per box
 	# (the generic ContactConstraint; the wheels get none: the tyre contact stays their sole ground contact).
@@ -221,6 +243,18 @@ static func build(config: MotorcycleConfig, world: SimWorld = null) -> Motorcycl
 	if contract_error != "":
 		return _fail(target, added_bodies, added_constraints, added_providers, contract_error)
 	return assembly
+
+
+## The distributed patch of one wheel (M2.5.3 Stage D) or null: the plane comes from the ground specification, the cross-section from the assembly's own
+## geometry copy of that wheel, the grid and compliance from `patch_spec`, the tangential model from `tire_spec` (copied by create_with_tire) and
+## the surface friction from the ground. Nothing is duplicated or hard-coded here. The plane normal is normalised once (the configuration accepts a
+## unit vector within its own, slightly looser tolerance than the constraint's).
+static func _create_wheel_patch(side: String, ground_body: SimRigidBody, wheel: SimRigidBody, geometry, wheel_radius: float, ground_spec, patch_spec, tire_spec):
+	var normal: Vector3 = ground_spec.normal.normalized()
+	if wheel_patch_factory.is_valid():
+		return wheel_patch_factory.call(side, ground_body, wheel, geometry, wheel_radius, ground_spec.point, normal, patch_spec, tire_spec, ground_spec.friction)
+	return TirePatchNormalSupport.create_with_tire(ground_body, wheel, geometry, wheel_radius, ground_spec.point, normal, patch_spec.stiffness_density,
+			patch_spec.damping_density, patch_spec.max_compression, patch_spec.lateral_count, patch_spec.circumferential_count, tire_spec, ground_spec.friction)
 
 
 ## "" if every hinge of `assembly` currently has coincident world anchors (within ANCHOR_TOLERANCE) and aligned world axes

@@ -48,14 +48,21 @@ var rear_suspension: RearSuspension
 ## M2.4.1 ground contact (all null when the configuration has no ground). The ground is a STATIC body registered in `world`; each
 ## contact is a WheelGroundContact (body A = ground, body B = the wheel) registered in `world.constraints`.
 var ground: SimRigidBody
-var front_wheel_contact: WheelGroundContact
-var rear_wheel_contact: WheelGroundContact
+## UNTYPED on purpose (M2.5.3 Stage D): the ONE ground-contact constraint of each wheel, a WheelGroundContact / TireGroundContact or, for a wheel
+## with a patch specification, its TirePatchNormalSupport (never both for one wheel).
+var front_wheel_contact
+var rear_wheel_contact
 ## M2.4.2 tyre models: the TireGroundContact of a wheel whose configuration has a tyre (the SAME object as that wheel's contact, so a
 ## tyre always references its wheel and its contact); null for a wheel without a tyre.
-var front_tire: TireGroundContact
-var rear_tire: TireGroundContact
-## M2.5.1 finite-width tyre cross-sections (copies of the configuration, null when not configured). Geometry only: the wheel contacts
-## above do not use them yet.
+## UNTYPED (M2.5.3 Stage D): the wheel's tangential tyre-force owner, a TireGroundContact or, for a patch wheel, its TirePatchNormalSupport.
+var front_tire
+var rear_tire
+## M2.5.3 Stage D distributed contact patches: the TirePatchNormalSupport of a wheel whose configuration has a patch specification (the SAME object
+## as that wheel's `*_wheel_contact` and `*_tire`: the sole ground contact and sole tangential owner); null for a one-point wheel.
+var front_tire_patch
+var rear_tire_patch
+## M2.5.1 finite-width tyre cross-sections (copies of the configuration, null when not configured). A patch wheel's TirePatchNormalSupport reads
+## its own wheel's object (M2.5.3 Stage D), as does the wireframe; the one-point contacts do not use them.
 var front_tire_geometry
 var rear_tire_geometry
 
@@ -122,12 +129,12 @@ func has_ground() -> bool:
 	return ground != null and front_wheel_contact != null and rear_wheel_contact != null
 
 
-## The two wheel contacts in the order front, rear (empty without ground).
+## The two wheel contacts in the order front, rear (empty without ground); a patch wheel contributes its TirePatchNormalSupport.
 func ground_contacts() -> Array:
 	return [front_wheel_contact, rear_wheel_contact] if has_ground() else []
 
 
-## The tyre models in the order front, rear (a wheel without a tyre is skipped).
+## The tyre models in the order front, rear (a wheel without a tyre is skipped); a patch wheel contributes its TirePatchNormalSupport.
 func tires() -> Array:
 	var result: Array = []
 	for tire in [front_tire, rear_tire]:
@@ -169,6 +176,8 @@ func remove_ground() -> void:
 	rear_wheel_contact = null
 	front_tire = null
 	rear_tire = null
+	front_tire_patch = null
+	rear_tire_patch = null
 	ground = null
 
 

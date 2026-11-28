@@ -6,7 +6,8 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## Jacobian) and use the existing `softness` (regularisation) and `bias` fields.
 ## Without a tyre specification (`tire == null`, the Stage B configuration built by `create()`) it carries NO tangential row, no slip, no
 ## rolling resistance and no tyre-force model. With one (`create_with_tire()`, Stage C, see "Stage C" below) the SAME constraint is the sole
-## owner of the wheel's tangential and rolling-resistance response. It is not registered by the motorcycle builder (Stage D). Units and
+## owner of the wheel's tangential and rolling-resistance response. MotorcycleBuilder registers one per wheel that has a MotorcycleTirePatchSpec (Stage D), INSTEAD of the
+## one-point TireGroundContact, never next to it. Units and
 ## equations: PHYSICS_CONVENTIONS.md ("Tyre patch normal support (M2.5.3 Stage B)" and "Tyre patch force integration (M2.5.3 Stage C)").
 ##
 ## ---- Physical model (per sample i, represented surface area A_i in m^2, from Stage A) ----
