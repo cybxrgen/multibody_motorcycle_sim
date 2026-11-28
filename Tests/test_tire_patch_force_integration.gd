@@ -1451,3 +1451,346 @@ func test_i_d_c_angular_withdrawal_reverses_the_application_order_so_a_rounded_r
 	check(not s.contact_active and s.last_reason != "" and not s.last_reason.contains("could not be withdrawn"), "finish() ends the failed contact with the ordinary failure reason (%s)" % s.last_reason)
 	check(s._withdrawal_fault == "" and s.validate().is_empty(), "finish(): no withdrawal fault")
 	check_no_tire_state(s, "after finish()")
+
+
+# ---------------------------------------------------------------- J: low-speed behaviour of the patch (reference-speed crossover, rest, creep)
+##
+## Low-speed behaviour of the DISTRIBUTED patch around the reference speed v_ref of the tyre (0.5 m/s for the prototype tyre). Every test drives the
+## real patch (create_with_tire(); prepare() / solve_iteration() / finish(); SimWorld.step() for the rest test) on the HEAVY or LIGHT rig of this
+## file. Neither the one-point TireGroundContact nor a TireModel helper supplies an expectation: the expectations are written out here from the
+## definitions (the oracles below):
+##   slip velocity  s = -(v + w x r) . e at the load-weighted effective point (r = p_eff - x; the fixtures use R_eff = R, so the rolling-radius term
+##                  vanishes), with e = e_x, e_y the tyre axes of the rig;
+##   denominator    D = sqrt(v_hub^2 + v_ref^2), v_hub = v . e_x of the wheel CENTRE (neither the contact-point velocity nor the spin);
+##   brush law      rho = |(k_x s_x / (mu_x D), k_y s_y / (mu_y D))|, F / N = phi k s / D, phi = g(rho) / rho, g = rho - rho^2/3 + rho^3/27 for rho < 3
+##                  and 1 from 3 on (g' = (1 - rho/3)^2 >= 0: g increases and reaches 1 at rho = 3);
+##   creep bound    3 mu v_ref / k (PHYSICS_CONVENTIONS.md, "Approximations"): for sliding along ONE axis at v_hub = 0 (D = v_ref) rho = k s / (mu v_ref),
+##                  so g reaches 1 (the friction limit) at s = 3 mu v_ref / k, and every tangential load below mu N is carried at a sliding speed below it.
+##                  For v_hub != 0 the bound is 3 mu D / k; for combined slip rho combines both axes. The tests below use exactly the conditions
+##                  in which the bound applies (zero hub speed, one axis at a time).
+## Tolerances: the heavy-rig value of this file, 2e-4 relative to the expected force (the response changes the state of the 1e7 kg wheel by < 1e-6
+## relative; measured agreement with the law is 1e-7 to 5e-5). Quantities that are zero in exact arithmetic (rest) are bounded by 1e-6 of the load
+## (the TESTING.md minimum relative tolerance of float32 quantities) and by the sliding speed that this force corresponds to in the linear law.
+
+## g(rho) written out (not TireModel.saturation).
+func brush_g(rho: float) -> float:
+	if rho >= 3.0:
+		return 1.0
+	return rho - rho * rho / 3.0 + rho * rho * rho / 27.0
+
+
+## The rho in [0, 3] with g(rho) = f for 0 <= f <= 1, by bisection (g is strictly increasing on [0, 3]).
+func brush_g_inverse(f: float) -> float:
+	var lo: float = 0.0
+	var hi: float = 3.0
+	for i in 100:
+		var mid: float = 0.5 * (lo + hi)
+		if brush_g(mid) < f:
+			lo = mid
+		else:
+			hi = mid
+	return 0.5 * (lo + hi)
+
+
+## Force per unit load from the brush law by hand: {fx, fy, rho} for the slip velocities s_x, s_y (m/s) and the denominator d (m/s).
+func hand_law(spec, s_x: float, s_y: float, d: float) -> Dictionary:
+	var mu_x: float = spec.grip_longitudinal * MU_S
+	var mu_y: float = spec.grip_lateral * MU_S
+	var ex: float = spec.longitudinal_stiffness * s_x / (d * mu_x)
+	var ey: float = spec.lateral_stiffness * s_y / (d * mu_y)
+	var rho: float = sqrt(ex * ex + ey * ey)
+	var phi: float = brush_g(rho) / rho if rho > 1.0e-12 else 1.0
+	return {"fx": phi * spec.longitudinal_stiffness * s_x / d, "fy": phi * spec.lateral_stiffness * s_y / d, "rho": rho}
+
+
+## First-principles state of a SOLVED rig (after finish()): {s_x, s_y (m/s), hub (m/s), load (N), point}, v_c = v + w x (p_eff - x) with the
+## load-weighted effective point of sample_report().
+func slip_state(rig: Dictionary) -> Dictionary:
+	var wheel: SimRigidBody = rig["wheel"]
+	var o: Dictionary = oracle_weighted(rig["support"].sample_report())
+	var v_c: Vector3 = wheel.linear_velocity + wheel.angular_velocity.cross(o["point"] - wheel.position)
+	return {"s_x": -v_c.dot(rig["e_x"]), "s_y": -v_c.dot(rig["e_y"]), "hub": wheel.linear_velocity.dot(rig["e_x"]), "load": o["load"], "point": o["point"]}
+
+
+## Height of the wheel centre above the effective point of the resting heavy rig (m): only used to choose the spin that gives an intended tread speed
+## (s_x = -v + spin * lever); every expectation uses the slip measured from the state after the solve.
+func resting_lever() -> float:
+	var calm: Dictionary = heavy_rig()
+	solve_in_place(calm)
+	return calm["wheel"].position.y - oracle_weighted(calm["support"].sample_report())["point"].y
+
+
+## One solved heavy rig with the hub speed `hub` along e_x, a lateral speed of 0.03 m/s (s_y = -0.03 m/s) and the spin that makes the longitudinal
+## tread slip about +0.03 m/s (driving). `mirrored` reverses the hub speed and the spin (s_x changes sign, s_y does not).
+func crossover_case(hub: float, mirrored: bool, lever: float) -> Dictionary:
+	var sgn: float = -1.0 if mirrored else 1.0
+	var rig: Dictionary = heavy_rig(DELTA, {"forward_speed": sgn * hub, "lateral_speed": 0.03, "spin": sgn * (hub + 0.03) / lever})
+	solve_in_place(rig)
+	var s = rig["support"]
+	var st: Dictionary = slip_state(rig)
+	return {"st": st, "fx": s.longitudinal_force() / st["load"], "fy": s.lateral_force() / st["load"], "slip": s.current_slip()}
+
+
+func test_j_a_the_patch_crosses_the_reference_speed_with_the_smooth_denominator_and_without_a_jump() -> void:
+	var spec = spec_with()
+	var v_ref: float = spec.low_speed_reference
+	var mu_x: float = spec.grip_longitudinal * MU_S
+	var mu_y: float = spec.grip_lateral * MU_S
+	check_near(spec.rolling_radius, R, 0.0, "fixture: R_eff = R (no rolling-radius term in the slip velocity)")
+	var lever: float = resting_lever()
+	# Hub speeds in units of v_ref: far below, below, a dense run through the crossover v_hub = v_ref, and above.
+	var multiples: Array = [0.0, 0.25, 0.5, 0.8, 0.9, 0.92, 0.94, 0.96, 0.98, 0.99, 1.0, 1.01, 1.02, 1.04, 1.06, 1.08, 1.1, 1.25, 2.0, 4.0, 10.0]
+	var previous: Dictionary = {}
+	for m in multiples:
+		var hub: float = m * v_ref
+		var up: Dictionary = crossover_case(hub, false, lever)
+		var down: Dictionary = crossover_case(hub, true, lever)
+		var st: Dictionary = up["st"]
+		var d: float = sqrt(st["hub"] * st["hub"] + v_ref * v_ref)
+		var law: Dictionary = hand_law(spec, st["s_x"], st["s_y"], d)
+		var label: String = "hub speed %s v_ref" % m
+		check(absf(st["hub"] - hub) < 1.0e-5 and st["s_x"] > 0.0 and st["s_y"] < 0.0 and law["rho"] < 3.0, "fixture: %s, driving with a leftward contact slide, not saturated (rho %s)" % [label, law["rho"]])
+		# The force of the patch against the law written out, with the smooth denominator.
+		check_near(up["fx"], law["fx"], 2.0e-4 * absf(law["fx"]) + 1.0e-9, "%s: longitudinal force per load" % label)
+		check_near(up["fy"], law["fy"], 2.0e-4 * absf(law["fy"]) + 1.0e-9, "%s: lateral force per load" % label)
+		# The patch's own slip evaluation (the path the solve uses) reports the same denominator and slips.
+		var slip: Dictionary = up["slip"]
+		check(slip["valid"], "%s: valid slip" % label)
+		check_near(slip["reference_speed"], d, 2.0e-6 * d, "%s: slip denominator sqrt(v_hub^2 + v_ref^2)" % label)
+		check_near(slip["slip_x"], st["s_x"] / d, 2.0e-5, "%s: longitudinal slip s_x / D" % label)
+		check_near(slip["slip_y"], st["s_y"] / d, 2.0e-5, "%s: lateral slip s_y / D" % label)
+		# Mirror symmetry: D is even in the hub speed, so the lateral force is even and the longitudinal force odd (same load, same slip velocities).
+		var mirror: Dictionary = down["st"]
+		check_near(mirror["hub"], -st["hub"], 1.0e-6 * (absf(st["hub"]) + 1.0), "%s: mirrored hub speed" % label)
+		check_near(mirror["load"], st["load"], 1.0e-4 * st["load"], "%s: mirrored load" % label)
+		check_near(down["fy"], up["fy"], 2.0e-4 * absf(up["fy"]), "%s: the lateral force is even in the hub speed" % label)
+		check_near(down["fx"], -up["fx"], 2.0e-4 * absf(up["fx"]) + 1.0e-9, "%s: the longitudinal force is odd in the hub speed" % label)
+		# No jump: D(v) is smooth and rho = c / D, so |d(rho)/dv| = rho v / D^2 <= rho / (2 v_ref) (maximum at v = v_ref), and |d g / d rho| <= 1. The
+		# ellipse-normalised force u = (F_x / mu_x, F_y / mu_y) has |u| = g(rho) and a constant direction at fixed slip velocities, so between two hub
+		# speeds |u_2 - u_1| <= rho_max dv / (2 v_ref) (rho is largest at the smaller |v|), plus the agreement with the law (2e-4 per point) twice.
+		var u: Vector2 = Vector2(up["fx"] / mu_x, up["fy"] / mu_y)
+		if not previous.is_empty():
+			var dv: float = (m - previous["m"]) * v_ref
+			var bound: float = maxf(law["rho"], previous["rho"]) * dv / (2.0 * v_ref) + 4.0e-4 * maxf(u.length(), previous["u"].length())
+			check((u - previous["u"]).length() <= bound, "%s: no jump from %s v_ref (change %s, bound %s)" % [label, previous["m"], (u - previous["u"]).length(), bound])
+		previous = {"m": m, "rho": law["rho"], "u": u}
+		if m == 1.0:
+			# The fixture can tell a wrong denominator: at the crossover each alternative changes the force by far more than the tolerance.
+			var alternatives: Dictionary = {"D = v_ref (no hub dependence, or max(|v|, v_ref))": v_ref, "D = |v| + v_ref": absf(st["hub"]) + v_ref,
+					"sqrt(v^2 + (v_ref / 2)^2)": sqrt(st["hub"] * st["hub"] + 0.25 * v_ref * v_ref)}
+			for name in alternatives:
+				var alt: Dictionary = hand_law(spec, st["s_x"], st["s_y"], alternatives[name])
+				check(absf(alt["fx"] - law["fx"]) > 0.05 * absf(law["fx"]) and absf(alt["fy"] - law["fy"]) > 0.05 * absf(law["fy"]), "fixture: the wrong denominator %s is %s / %s away" % [name, absf(alt["fx"] - law["fx"]) / absf(law["fx"]), absf(alt["fy"] - law["fy"]) / absf(law["fy"])])
+
+
+func test_j_b_the_reference_speed_comes_from_the_hub_velocity_and_is_frozen_for_the_whole_solve() -> void:
+	var spec = spec_with()
+	var v_ref: float = spec.low_speed_reference
+	# (1) SELECTION: D uses the component of the wheel CENTRE's velocity along e_x only. The lateral speed, the spin, a yaw rate and the tyre's yaw and
+	# camber change the contact-point velocity or the world-frame velocity, but not v . e_x.
+	var hub: float = 0.3
+	var expected: float = sqrt(hub * hub + v_ref * v_ref)
+	var variants: Array = [{}, {"lateral_speed": 2.0}, {"spin": 12.0}, {"spin": -12.0}, {"lateral_speed": -1.5, "spin": -3.0, "omega": Vector3(0.0, 2.0, 0.0), "yaw": 0.5, "camber": 0.2}]
+	for variant in variants:
+		var opts: Dictionary = variant.duplicate()
+		opts["forward_speed"] = hub
+		var rig: Dictionary = heavy_rig(DELTA, opts)
+		var s = rig["support"]
+		s.prepare(DT, rig["world"].config)
+		prescribe(s, func(_p: Vector3) -> float: return 0.1)
+		check_near(s._reference_speed, expected, 1.0e-6 * expected, "frozen reference speed for %s" % [variant])
+		var slip: Dictionary = s.current_slip()
+		check(slip["valid"], "valid slip for %s" % [variant])
+		check_near(slip["reference_speed"], expected, 2.0e-6 * expected, "the patch's slip denominator for %s" % [variant])
+	# (2) FROZEN: with the normal impulses held (so that only the tangential response iterates, as in the implicit test above) the response removes
+	# part of the hub speed within the solve. The converged impulse must satisfy lambda = phi k ln s_end / D with D of the START hub speed, not with the
+	# D of the changed hub speed: the two differ by more than 2 % here. The second case starts above v_ref and ends below it.
+	var lever: float = resting_lever()
+	for cfg in [{"v0": 0.4, "s_x0": -0.4, "lateral": 0.0, "ln": 3.0, "crosses": false}, {"v0": 0.55, "s_x0": -0.35, "lateral": 0.1, "ln": 2.5, "crosses": true}]:
+		var label: String = "start hub speed %s m/s" % cfg["v0"]
+		var rig: Dictionary = make_rig({"height": R - DELTA, "forward_speed": cfg["v0"], "lateral_speed": cfg["lateral"], "spin": (cfg["v0"] + cfg["s_x0"]) / lever})
+		var s = rig["support"]
+		var wheel: SimRigidBody = rig["wheel"]
+		s.prepare(DT, rig["world"].config)
+		var count: int = s.rows.size()
+		prescribe(s, func(_p: Vector3) -> float: return cfg["ln"] / float(count))
+		var hub0: float = wheel.linear_velocity.dot(rig["e_x"])
+		var d0: float = sqrt(hub0 * hub0 + v_ref * v_ref)
+		var frozen: float = s._reference_speed
+		check_near(frozen, d0, 1.0e-6 * d0, "%s: the reference speed of the solve is sqrt(v_hub0^2 + v_ref^2)" % label)
+		var ln: float = s.aggregate_normal_impulse()
+		var constant: bool = true
+		for i in 60:
+			s._solve_tire_iteration()
+			constant = constant and s._reference_speed == frozen
+		check(constant, "%s: the reference speed is the same value in every iteration of the solve" % label)
+		var hub1: float = wheel.linear_velocity.dot(rig["e_x"])
+		var d1: float = sqrt(hub1 * hub1 + v_ref * v_ref)
+		check(hub0 - hub1 > 0.1 * hub0 and (hub1 < v_ref and hub0 > v_ref if cfg["crosses"] else hub1 < hub0 and hub0 < v_ref), "fixture: %s: the response changes the hub speed from %s to %s m/s (v_ref %s)" % [label, hub0, hub1, v_ref])
+		check_near(s.current_slip()["reference_speed"], d1, 2.0e-6 * d1, "%s: the live slip follows the CURRENT hub speed (the frozen D does not)" % label)
+		var p_eff: Vector3 = s.effective_contact_point()
+		var v_c: Vector3 = wheel.linear_velocity + wheel.angular_velocity.cross(p_eff - wheel.position)
+		var s_x: float = -v_c.dot(rig["e_x"])
+		var s_y: float = -v_c.dot(rig["e_y"])
+		var law0: Dictionary = hand_law(spec, s_x, s_y, d0)
+		var law1: Dictionary = hand_law(spec, s_x, s_y, d1)
+		var lam_x: float = s.longitudinal_force() * DT
+		var lam_y: float = s.lateral_force() * DT
+		check(law0["rho"] < 3.0 and law1["rho"] > law0["rho"], "fixture: %s: unsaturated at the end of the solve with the frozen D (rho %s, with the live D %s)" % [label, law0["rho"], law1["rho"]])
+		# 2e-3: the same tolerance as the implicit test above (phi is lagged by one iteration; measured agreement is below 1e-6 here).
+		check_near(lam_x, ln * law0["fx"], 2.0e-3 * absf(ln * law0["fx"]) + 1.0e-6, "%s: lambda_x uses the frozen D" % label)
+		check_near(lam_y, ln * law0["fy"], 2.0e-3 * absf(ln * law0["fy"]) + 1.0e-6, "%s: lambda_y uses the frozen D" % label)
+		check(absf(ln * law1["fx"] - lam_x) > 0.02 * absf(lam_x), "fixture: %s: a live D would change lambda_x by %s of its value" % [label, absf(ln * law1["fx"] - lam_x) / absf(lam_x)])
+		# (3) It is a property of the SOLVE: the next prepare() takes the hub speed of that moment.
+		s.finish()
+		s.prepare(DT, rig["world"].config)
+		check_near(s._reference_speed, d1, 1.0e-6 * d1, "%s: the next solve freezes the new hub speed" % label)
+		check(absf(s._reference_speed - frozen) > 0.02 * frozen, "fixture: %s: the new reference speed differs from the old one" % label)
+
+
+func test_j_c_a_loaded_wheel_at_rest_develops_no_tangential_response_and_accumulates_nothing() -> void:
+	var spec = spec_with()
+	var k_max: float = maxf(spec.longitudinal_stiffness, spec.lateral_stiffness)
+	# A force of 1e-6 of the load is the tolerance; in the linear law F / N = k s / v_ref it corresponds to the sliding speed v_tol.
+	var rel_tol: float = 1.0e-6
+	var v_tol: float = rel_tol * spec.low_speed_reference / k_max
+	# (1) A loaded wheel exactly at rest (HEAVY rig, no gravity, zero velocities, crown compressed by DELTA): after 1, 20 and 200 iterations of the
+	# same solve the tangential impulse, the rolling-resistance impulse and the horizontal wheel velocity are still zero (not growing with the iterations).
+	var rig: Dictionary = heavy_rig()
+	var s = rig["support"]
+	var wheel: SimRigidBody = rig["wheel"]
+	check(wheel.linear_velocity == Vector3.ZERO and wheel.angular_velocity == Vector3.ZERO, "fixture: the wheel starts exactly at rest")
+	s.prepare(DT, rig["world"].config)
+	var done: int = 0
+	for target in [1, 20, 200]:
+		while done < target:
+			s.solve_iteration()
+			done += 1
+		var ln: float = s.aggregate_normal_impulse()
+		check(ln > 0.0, "fixture: the patch is loaded after %d iterations" % target)
+		check(absf(s.longitudinal_force()) <= rel_tol * ln / DT and absf(s.lateral_force()) <= rel_tol * ln / DT, "%d iterations at rest: no tangential force (%s, %s N for a load of %s N)" % [target, s.longitudinal_force(), s.lateral_force(), ln / DT])
+		check(absf(s.rolling_resistance_torque()) <= rel_tol * spec.rolling_resistance * spec.rolling_radius * ln / DT, "%d iterations at rest: no rolling-resistance moment (%s N m)" % [target, s.rolling_resistance_torque()])
+		check(Vector2(wheel.linear_velocity.dot(rig["e_x"]), wheel.linear_velocity.dot(rig["e_y"])).length() <= v_tol, "%d iterations at rest: no horizontal motion (%s m/s)" % [target, wheel.linear_velocity])
+	s.finish()
+	check(s.carried_tire_impulse().length() <= rel_tol * s.aggregate_normal_load() * DT, "no tangential impulse is carried to the next step")
+	# (2) The real step path (ConstraintSolver with the split pass, warm starting, integration, gravity): a 15 kg wheel settles on its patch and rests
+	# there for 120 steps (1 s). A free upright wheel on a patch has no roll stability of its own: from float32 noise a roll motion of the whole wheel,
+	# with or without a tyre (checked on a tyre-less twin), grows with a time constant of a few tenths of a second, and after ~2 s it is not at rest any
+	# more. The horizon is therefore the part of the motion that IS at rest; there the tyre must stay silent: it creates no force and no carried impulse.
+	var lrig: Dictionary = make_rig({"height": R - DELTA, "gravity": G})
+	var ls = lrig["support"]
+	var lwheel: SimRigidBody = lrig["wheel"]
+	var world: SimWorld = lrig["world"]
+	var worst_force: float = 0.0
+	var worst_carried: float = 0.0
+	var worst_roll: float = 0.0
+	var worst_speed: float = 0.0
+	var stepped: bool = true
+	for i in 120:
+		stepped = world.step() and stepped
+		var n: float = ls.normal_load()
+		worst_force = maxf(worst_force, ls.tangential_force_world().length() / maxf(n, 1.0))
+		worst_carried = maxf(worst_carried, ls.carried_tire_impulse().length() / maxf(n * DT, 1.0e-9))
+		worst_roll = maxf(worst_roll, absf(ls.rolling_resistance_torque()) / (spec.rolling_resistance * spec.rolling_radius * maxf(n, 1.0)))
+		worst_speed = maxf(worst_speed, Vector2(lwheel.linear_velocity.dot(lrig["e_x"]), lwheel.linear_velocity.dot(lrig["e_y"])).length())
+	check(stepped, "all 120 steps complete")
+	check_near(ls.normal_load(), LIGHT * G, 1.0e-4 * LIGHT * G, "fixture: the wheel rests on the patch with its weight")
+	check(worst_force <= rel_tol, "no tangential force at rest (worst %s of the load)" % worst_force)
+	check(worst_carried <= rel_tol, "no carried tangential impulse at rest (worst %s of the normal impulse)" % worst_carried)
+	check(worst_roll <= rel_tol, "no rolling-resistance moment at rest (worst %s of c_rr N R)" % worst_roll)
+	check(worst_speed <= v_tol, "no horizontal creep at rest (worst %s m/s, bound %s m/s)" % [worst_speed, v_tol])
+
+
+func test_j_d_creep_at_rest_is_bounded_by_3_mu_vref_over_k_and_does_not_depend_on_the_sample_count() -> void:
+	var spec = spec_with()
+	var v_ref: float = spec.low_speed_reference
+	var mu_x: float = spec.grip_longitudinal * MU_S
+	var mu_y: float = spec.grip_lateral * MU_S
+	var bound_x: float = 3.0 * mu_x * v_ref / spec.longitudinal_stiffness
+	var bound_y: float = 3.0 * mu_y * v_ref / spec.lateral_stiffness
+	check_near(bound_x, 0.08, 1.0e-12, "fixture: the documented 0.08 m/s of the prototype tyre (longitudinal)")
+	var lever: float = resting_lever()
+	var fractions: Array = [0.1, 0.5, 0.9, 0.99]  # tangential load as a fraction of the friction limit mu N
+	var lateral_by_grid: Dictionary = {}
+	for grid in [[9, 48], [17, 96]]:
+		var key: String = "%dx%d" % [grid[0], grid[1]]
+		var lateral: Array = []
+		var previous_speed: float = 0.0
+		for f in fractions:
+			# The sliding speed that carries the load f mu N, from the inverse of the brush law (hub speed zero, one axis).
+			var rho: float = brush_g_inverse(f)
+			var s_lat: float = rho * mu_y * v_ref / spec.lateral_stiffness
+			var s_lon: float = rho * mu_x * v_ref / spec.longitudinal_stiffness
+			check(s_lat < bound_y and s_lon < bound_x and s_lat > previous_speed, "%s: load %s mu N is carried below the creep bound (%s of %s m/s lateral, %s of %s m/s longitudinal)" % [key, f, s_lat, bound_y, s_lon, bound_x])
+			previous_speed = s_lat
+			for sgn in [1.0, -1.0]:
+				var label: String = "%s, load %s mu N, %s" % [key, f, "right/driving" if sgn > 0.0 else "left/braking"]
+				# Lateral: the wheel slides sideways at rest. s_y = -v_y, so the force points against the sliding.
+				var rig: Dictionary = heavy_rig(DELTA, {"lateral_speed": sgn * s_lat, "lat": grid[0], "circ": grid[1]})
+				solve_in_place(rig)
+				var s = rig["support"]
+				var st: Dictionary = slip_state(rig)
+				check(absf(st["hub"]) < 1.0e-5, "fixture: %s: zero hub speed, so D = v_ref" % label)
+				check_near(s.lateral_force() / st["load"], -sgn * f * mu_y, 2.0e-4 * f * mu_y, "%s: lateral sliding carries exactly the load that the inverse law gives" % label)
+				check(s.lateral_force() * sgn < 0.0 and absf(s.longitudinal_force()) <= 1.0e-6 * st["load"], "%s: the lateral force opposes the sliding, no longitudinal force" % label)
+				check(s.friction_utilization() < 1.0 and absf(s.lateral_force()) < mu_y * st["load"], "%s: bounded below the friction limit" % label)
+				if sgn > 0.0:
+					lateral.append(s.lateral_force() / st["load"])
+				# Longitudinal: the wheel spins in place at zero hub speed; positive spin = driving = force forward.
+				var spinning: Dictionary = heavy_rig(DELTA, {"spin": sgn * s_lon / lever, "lat": grid[0], "circ": grid[1]})
+				solve_in_place(spinning)
+				var sp = spinning["support"]
+				var sst: Dictionary = slip_state(spinning)
+				var law: Dictionary = hand_law(spec, sst["s_x"], sst["s_y"], sqrt(sst["hub"] * sst["hub"] + v_ref * v_ref))
+				check(absf(sst["hub"]) < 1.0e-5 and absf(sst["s_x"]) < bound_x and absf(sst["s_x"] - sgn * s_lon) < 0.05 * s_lon, "fixture: %s: spinning in place, s_x = %s below the bound %s" % [label, sst["s_x"], bound_x])
+				check_near(sp.longitudinal_force() / sst["load"], law["fx"], 2.0e-4 * absf(law["fx"]), "%s: longitudinal creep against the law with D = v_ref" % label)
+				check_near(sp.longitudinal_force() / sst["load"], sgn * f * mu_x, 0.05 * f * mu_x, "%s: and close to the load that the inverse law gives (the slip is measured at the effective point, hence the looser bound)" % label)
+				check(sp.longitudinal_force() * sgn > 0.0 and sp.friction_utilization() < 1.0 and absf(sp.lateral_force()) <= 1.0e-6 * sst["load"], "%s: driving/braking direction, below the limit, no lateral force" % label)
+		lateral_by_grid[key] = lateral
+		# The creep bound is where the force saturates: at it and above it the force is the friction limit and no longer grows.
+		for factor in [1.0, 1.5]:
+			var rig: Dictionary = heavy_rig(DELTA, {"lateral_speed": factor * bound_y, "lat": grid[0], "circ": grid[1]})
+			solve_in_place(rig)
+			var st: Dictionary = slip_state(rig)
+			check_near(absf(rig["support"].lateral_force()) / st["load"], mu_y, 2.0e-4 * mu_y, "%s: at %s times the creep bound the lateral force is mu N" % [key, factor])
+			check_near(rig["support"].friction_utilization(), 1.0, 1.0e-4, "%s: and the ellipse is saturated" % key)
+	# The response per unit load does not depend on the number of samples (pure lateral sliding: the slip velocity is the same at every sample).
+	for i in fractions.size():
+		check_near(lateral_by_grid["17x96"][i], lateral_by_grid["9x48"][i], 2.0e-4 * absf(lateral_by_grid["9x48"][i]), "load %s mu N: the same force per unit load with 3.8 times more samples" % fractions[i])
+
+
+func test_j_e_repeated_solver_iterations_converge_to_the_bounded_response_and_apply_it_once() -> void:
+	var spec = spec_with()
+	var mu_y: float = spec.grip_lateral * MU_S
+	# A 15 kg wheel (the implicit coupling matters) slides sideways at 0.05 m/s (unsaturated) or is at rest, for 1 to 80 iterations of ONE solve.
+	# The tyre responds to the slip of the CURRENT iterate. After ONE iteration the normal rows (Gauss-Seidel, row by row) have not converged and
+	# leave the wheel in an asymmetric motion even though it started at rest (the tyre-less twin shows the same motion), so the tyre legitimately sees a
+	# slip: measured 2 % of the normal impulse after 1 iteration, 3e-4 after 2, 1e-5 after 5 and 1e-9 from 10 iterations on (float32 noise). This is the
+	# transient of the normal solve, not an accumulation. Hence the budget and the friction limit are checked for every count, and the zero response at
+	# rest and the real response while sliding only from 10 iterations on (the default is 20, SimConfig.solver_iterations).
+	var tangential_by_count: Dictionary = {}
+	for iterations in [1, 10, 20, 80]:
+		for sliding in [true, false]:
+			var label: String = "%d iterations, %s" % [iterations, "sliding at 0.05 m/s" if sliding else "at rest"]
+			var rig: Dictionary = make_rig({"height": R - DELTA, "lateral_speed": 0.05 if sliding else 0.0, "iterations": iterations, "spec_overrides": {"rolling_resistance": 0.0}})
+			var s = rig["support"]
+			var wheel: SimRigidBody = rig["wheel"]
+			var v0: Vector3 = wheel.linear_velocity
+			solve_in_place(rig, iterations)
+			var lam_n: float = oracle_weighted(s.sample_report())["load"] * DT
+			var impulse: Vector3 = s.tangential_force_world() * DT
+			# The horizontal momentum change of the wheel is the tangential impulse, once (the normal rows act along n only).
+			var dv: Vector3 = wheel.linear_velocity - v0
+			var horizontal: Vector3 = wheel.mass * (dv - Vector3.UP * dv.dot(Vector3.UP))
+			check_vec3_near(horizontal, impulse, 1.0e-5 * (impulse.length() + lam_n * 1.0e-3), "%s: the momentum change is the reported tangential impulse, applied once" % label)
+			check(impulse.length() <= mu_y * lam_n * (1.0 + 1.0e-6), "%s: the impulse stays inside the friction limit (%s of %s)" % [label, impulse.length(), mu_y * lam_n])
+			if iterations < 10:
+				continue
+			if sliding:
+				check(impulse.length() > 0.05 * mu_y * lam_n and s.lateral_force() < 0.0, "fixture: %s: a real response against the sliding to the right" % label)
+				tangential_by_count[iterations] = impulse.length() / lam_n
+			else:
+				check(impulse.length() <= 1.0e-6 * lam_n, "%s: no tangential impulse accumulates at rest (%s of the normal impulse %s)" % [label, impulse.length(), lam_n])
+	# Converged: the response per unit normal impulse of 20 and 80 iterations agree (the implicit lag of the friction factor has died out), so
+	# further iterations do not add impulse.
+	check_near(tangential_by_count[80], tangential_by_count[20], 2.0e-3 * tangential_by_count[80], "the response per unit normal impulse is converged (20 against 80 iterations: %s, %s)" % [tangential_by_count[20], tangential_by_count[80]])
