@@ -163,7 +163,7 @@ func _process(delta: float) -> void:
 	wireframe.update_wireframe(alpha)
 	patch_view.update_patch_view(alpha)
 	_update_contact_markers(alpha)
-	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] collision-box + tyre wireframe: %s  [P] contact-patch samples (candidates dim, active bright, tick length = relative normal support; front cyan, rear orange): %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching, orange = separated." % [
+	_label.text = "%s\n%s\n%s\n%s\n%s\n%s\n[W/Up] throttle  [S/Down] brake  [A/Left] steer left  [D/Right] steer right  [Space] pause/resume  [N] step (paused)  [R] reset\n[L] local axes  [C] COM  [J] anchors  [G] collision-box + tyre wireframe: %s  [P] contact-patch samples (candidates dim, active bright, tick length = relative normal support; front cyan, rear orange): %s\nCONTROLS (direct inputs, not an engine or rider): throttle %.2f (rear axle torque up to %.0f N m), brake %.2f (up to %.0f / %.0f N m front / rear, opposing the wheel spin), steering %+.2f (motor, up to %.1f rad/s, %.0f N m, limit +-%.2f rad).\nPhysical model: gravity, free hinges, suspension, tyre contacts on the wheels, box-ground contacts on the four structural bodies. Not a ride, not self-balancing: without a rider it falls over.\nGreen marker = touching (patched wheel: aggregate physical patch contact), orange = separated (patched wheel: no physical contact; the marker is then the finite-width geometric lowest point)." % [
 		"PAUSED" if paused else "running", debug_overlay.build_report(), _joint_report(), _fork_report(), _contact_report(), _box_contact_report(),
 		"ON" if wireframe.enabled else "off", "ON" if patch_view.enabled else "off", assembly.controls.throttle, assembly.controls.spec.max_drive_torque, assembly.controls.brake,
 		assembly.controls.spec.max_front_brake_torque, assembly.controls.spec.max_rear_brake_torque, assembly.controls.steering,
@@ -196,39 +196,75 @@ func _pose(body, alpha: float) -> Transform3D:
 	return SimBodyState.interpolate_transform(body.previous_state, body.published_state, alpha)
 
 
-## Signed gap (m) of a wheel's lowest point above the plane, from the interpolated published pose; NAN for degenerate geometry.
-func _published_geometry(contact, alpha: float) -> Dictionary:
-	var t: Transform3D = _pose(contact.body_b, alpha)
-	return WheelGroundContact.compute_geometry(t.origin, t.basis.get_rotation_quaternion(), contact.wheel_radius, contact.plane_point, contact.plane_normal)
+## The patch of wheel `k` (0 front, 1 rear), or null when that wheel has no patch specification (the one-point fallback).
+func _patch_of(k: int):
+	return assembly.front_tire_patch if k == 0 else assembly.rear_tire_patch
 
 
-## One sphere per wheel at its lowest point; green while touching (gap < 0.1 mm, including penetration), orange while separated.
+## Diagnostics of wheel `k` from the interpolated PUBLISHED pose (read-only). Two EXPLICIT, mutually exclusive paths per wheel:
+##  - patched wheel: the geometric gap and lowest point are TireGeometry.lowest_point of the patch's configured finite-width geometry;
+##    `physical_contact` is the patch's AGGREGATE physical state (has_aggregate_contact), never the circular gap or a sample's proximity;
+##    the slip is TireModel.slip at the patch's centre_of_pressure() and exists only while that aggregate state is valid (no stale slip);
+##  - wheel without a patch: the legacy WheelGroundContact geometry (circular lowest point, gap <= TOUCH_TOLERANCE) and the TireModel.slip
+##    call with its default contact point, exactly as before.
+## Keys: patched, valid, gap (m, geometric), wheel_point, lateral_offset (m, patched only), physical_contact (patched: aggregate patch
+## contact; legacy: gap-based touching), slip (TireModel.slip Dictionary, or {valid = false, reason}).
+func _wheel_report(k: int, alpha: float) -> Dictionary:
+	var contact = assembly.ground_contacts()[k]
+	var pose: Transform3D = _pose(contact.body_b, alpha)
+	var pub = contact.body_b.published_state
+	var patch = _patch_of(k)
+	if patch != null:
+		var lowest: Dictionary = TireGeometry.lowest_point(pose.origin, pose.basis.get_rotation_quaternion(), patch.geometry, patch.wheel_radius,
+			patch.plane_point, patch.plane_normal)
+		var physical: bool = patch.has_aggregate_contact()
+		var slip: Dictionary = {"valid": false, "reason": "no aggregate physical contact"}
+		var cop: Vector3 = patch.centre_of_pressure()
+		if physical and cop.is_finite() and patch.tire != null:
+			slip = TireModel.slip(pub.position, pub.orientation, pub.linear_velocity, pub.angular_velocity, patch.wheel_radius,
+				patch.tire.rolling_radius, patch.plane_point, patch.plane_normal, patch.tire.low_speed_reference, cop)
+		return {"patched": true, "valid": lowest.valid, "gap": lowest.gap, "wheel_point": lowest.wheel_point,
+			"lateral_offset": lowest.lateral_offset, "physical_contact": physical, "slip": slip}
+	var geometry: Dictionary = WheelGroundContact.compute_geometry(pose.origin, pose.basis.get_rotation_quaternion(), contact.wheel_radius,
+		contact.plane_point, contact.plane_normal)
+	var legacy_slip: Dictionary = TireModel.slip(pub.position, pub.orientation, pub.linear_velocity, pub.angular_velocity, contact.wheel_radius,
+		contact.tire.rolling_radius, contact.plane_point, contact.plane_normal, contact.tire.low_speed_reference)
+	return {"patched": false, "valid": geometry.valid, "gap": geometry.gap, "wheel_point": geometry.wheel_point, "lateral_offset": 0.0,
+		"physical_contact": geometry.valid and geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE, "slip": legacy_slip}
+
+
+## One sphere per wheel at its lowest point. Patched wheel: the finite-width geometric lowest point, green only while the patch is in
+## AGGREGATE PHYSICAL contact, orange otherwise (geometric proximity alone is not contact). Wheel without a patch: the circular lowest point,
+## green while touching (gap < 0.1 mm, including penetration), orange while separated.
 func _update_contact_markers(alpha: float) -> void:
-	var contacts: Array = assembly.ground_contacts()
-	for k in contacts.size():
-		var geometry: Dictionary = _published_geometry(contacts[k], alpha)
+	var count: int = assembly.ground_contacts().size()
+	for k in count:
+		var report: Dictionary = _wheel_report(k, alpha)
 		var marker: MeshInstance3D = _markers[k]
-		marker.visible = geometry.valid
-		if geometry.valid:
-			marker.position = geometry.wheel_point
-			marker.material_override.albedo_color = Color(0.1, 0.9, 0.2) if geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE else Color(1.0, 0.55, 0.0)
+		marker.visible = report.valid
+		if report.valid:
+			marker.position = report.wheel_point
+			marker.material_override.albedo_color = Color(0.1, 0.9, 0.2) if report.physical_contact else Color(1.0, 0.55, 0.0)
 
 
 ## Per tyre: signed gap and the contact state (from the published pose), the normal load, the tyre force, the friction utilisation and
 ## the rolling-resistance moment (last solved step, read-only queries of the solver's results), and the slips evaluated from the PUBLISHED
-## state with TireModel.slip (read-only). Nothing is written.
+## state with TireModel.slip (read-only), all through _wheel_report. A patched wheel reports its finite-width GEOMETRIC gap apart from its
+## PHYSICAL contact state, and shows slip only while the aggregate contact is valid. Nothing is written.
 func _contact_report() -> String:
 	var text: String = "tyre contacts (surface mu = %.2f, illustrative tyre parameters):" % (assembly.front_tire_patch.surface_friction if assembly.front_tire_patch != null else assembly.front_wheel_contact.friction)
 	var names: Array = ["front", "rear"]
 	var contacts: Array = assembly.ground_contacts()
 	for k in contacts.size():
 		var contact = contacts[k]
-		var geometry: Dictionary = _published_geometry(contact, 1.0)
-		var gap_text: String = "%+.2f mm" % (geometry.gap * 1000.0) if geometry.valid else "n/a (degenerate)"
-		var state: String = "TOUCHING" if geometry.valid and geometry.gap <= WheelGroundContact.TOUCH_TOLERANCE else "SEPARATED"
-		var pub = contact.body_b.published_state
-		var slip: Dictionary = TireModel.slip(pub.position, pub.orientation, pub.linear_velocity, pub.angular_velocity, contact.wheel_radius,
-			contact.tire.rolling_radius, contact.plane_point, contact.plane_normal, contact.tire.low_speed_reference)
+		var report: Dictionary = _wheel_report(k, 1.0)
+		var gap_text: String = "%+.2f mm" % (report.gap * 1000.0) if report.valid else "n/a (degenerate)"
+		if report.patched and report.valid:
+			gap_text += " (geometric, at %+.1f mm across the tread)" % (report.lateral_offset * 1000.0)
+		var state: String = "TOUCHING" if report.physical_contact else "SEPARATED"
+		if report.patched:
+			state = "PHYSICAL CONTACT" if report.physical_contact else "NO PHYSICAL CONTACT"
+		var slip: Dictionary = report.slip
 		var slip_text: String = "slip x %+.3f y %+.3f" % [slip.slip_x, slip.slip_y] if slip.valid else "slip n/a"
 		text += "\n  %s: gap %s  %s   normal %.0f N   Fx %+.0f N  Fy %+.0f N  (limits %.0f / %.0f N, utilisation %.2f)   rolling resistance %+.2f N m   %s" % [names[k], gap_text, slip_text,
 			contact.normal_load(), contact.longitudinal_force(), contact.lateral_force(), contact.longitudinal_force_limit(), contact.lateral_force_limit(),
