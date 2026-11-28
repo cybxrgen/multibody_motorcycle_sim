@@ -306,16 +306,9 @@ func reset_warm_start() -> void:
 	_rolling_angular_impulse = 0.0
 
 
-## Scales (lx, ly) radially into the friction ellipse of the normal impulse `ln` (zero for ln <= 0 or a zero limit).
+## Scales (lx, ly) radially into the friction ellipse of the normal impulse `ln` (zero for ln <= 0 or a zero limit): TireModel.into_ellipse.
 func _into_ellipse(lx: float, ly: float, ln: float) -> Vector2:
-	if not (ln > 0.0 and _mu_x > 0.0 and _mu_y > 0.0):
-		return Vector2.ZERO
-	var ux: float = lx / (_mu_x * ln)
-	var uy: float = ly / (_mu_y * ln)
-	var u: float = sqrt(ux * ux + uy * uy)
-	if u > 1.0:
-		return Vector2(lx / u, ly / u)
-	return Vector2(lx, ly)
+	return TireModel.into_ellipse(lx, ly, ln, _mu_x, _mu_y)
 
 
 func _solve_tire() -> void:
@@ -328,27 +321,8 @@ func _solve_tire() -> void:
 	if _touching and tire_forces_enabled and _axes_valid and ln > 0.0 and _mu_x > 0.0 and _mu_y > 0.0:
 		var s_x: float = _sx_lin.dot(body_b.linear_velocity) + _sx_ang.dot(body_b.angular_velocity)
 		var s_y: float = _sy_lin.dot(body_b.linear_velocity) + _sy_ang.dot(body_b.angular_velocity)
-		var d: float = _reference_speed
-		var ex: float = tire.longitudinal_stiffness * s_x / d / _mu_x
-		var ey: float = tire.lateral_stiffness * s_y / d / _mu_y
-		var phi: float = TireModel.reduction(sqrt(ex * ex + ey * ey))
-		var ax: float = phi * tire.longitudinal_stiffness * ln  # = dt * N * phi * k_x (lambda_n = N dt)
-		var ay: float = phi * tire.lateral_stiffness * ln
-		# (I - A G / D) lambda = A (s - G lambda_cur) / D
-		var m00: float = 1.0 - ax * _g00 / d
-		var m01: float = -ax * _g01 / d
-		var m10: float = -ay * _g10 / d
-		var m11: float = 1.0 - ay * _g11 / d
-		var q_x: float = s_x - (_g00 * cur_x + _g01 * cur_y)
-		var q_y: float = s_y - (_g10 * cur_x + _g11 * cur_y)
-		var b_x: float = ax * q_x / d
-		var b_y: float = ay * q_y / d
-		var det: float = m00 * m11 - m01 * m10
-		if is_finite(det) and det > 1.0e-9:
-			target = Vector2((m11 * b_x - m01 * b_y) / det, (-m10 * b_x + m00 * b_y) / det)
-		else:
-			target = Vector2(cur_x, cur_y)
-		target = _into_ellipse(target.x, target.y, ln)
+		target = TireModel.implicit_tangential_impulse(s_x, s_y, ln, cur_x, cur_y, _g00, _g01, _g10, _g11, tire.longitudinal_stiffness,
+			tire.lateral_stiffness, _mu_x, _mu_y, _reference_speed)
 	row_x.accumulated_impulse = target.x
 	row_y.accumulated_impulse = target.y
 	row_x.apply_impulse(target.x - cur_x)

@@ -10,11 +10,11 @@ A milestone being listed here is **not** authorization to start it: work begins 
 **Objective:** build the motorcycle as independent rigid bodies coupled only through M1 joints and contacts: chassis, steering/fork, swingarm, wheels,
 suspension, tire model and drivetrain. M1 (generic joints, contacts, split-impulse stabilization) is complete and accepted; its history is in Git.
 
-**Current milestone: M2.5.3 — Distributed finite-width tire contact patch. Current stage: Stage B — Area-weighted compliant normal support.**
-- **Completed:** M2.5.2 (merged, PR #19). M2.5.3 Stage A, deterministic finite-width tyre surface sampling (merged, PR #20).
-- **Awaiting review:** Stage B, area-weighted compliant normal support, is implemented and under review in PR #21 (open, not merged, not accepted).
-- **Remaining in M2.5.3:** Stage C tyre-force integration, Stage D motorcycle builder integration with transactional registration, Stage E regression, documentation and final reconciliation. None is started.
-- **Next authorized work boundary:** the outcome of the PR #21 review. Stages C–E are future work, not active assignments, and start only on an explicit user assignment.
+**Current milestone: M2.5.3 — Distributed finite-width tire contact patch. Current stage: Stage C — Tire-force integration.**
+- **Completed:** M2.5.2 (merged, PR #19). M2.5.3 Stage A, deterministic finite-width tyre surface sampling (merged, PR #20). M2.5.3 Stage B, area-weighted compliant normal support (merged, PR #21).
+- **Current stage:** Stage C, tyre-force integration (the M2.4.2 tyre model driven by the aggregate state of the patch), is implemented; PR #25 is the current Stage C candidate and is still under review until it is actually merged; PR #23 and PR #24 were closed without merging; Stage C is the authorized stage and is not accepted or merged.
+- **Remaining in M2.5.3:** Stage D motorcycle builder integration with transactional registration, Stage E regression, documentation and final reconciliation. Neither is started nor authorized.
+- **Next authorized work boundary:** the outcome of the Stage C review. Stages D and E start only on an explicit user assignment.
 
 What exists and how it was verified: `PROJECT_STATE.md`.
 
@@ -29,18 +29,18 @@ What exists and how it was verified: `PROJECT_STATE.md`.
 | M2.4.2.1 Tire speculative-contact correction (no tyre action across the air gap of a speculative contact) | Implemented, reviewed, accepted and merged (PR #15) |
 | M2.5.1 Finite-width tire geometry (motorcycle-specific tyre cross-section, lowest point against a plane with camber, per-wheel configuration; geometry only), with M2.5.1.1 validation hardening | Implemented, accepted and merged (PR #17) |
 | M2.5.1.2 Toggleable geometry wireframe (presentation only: oriented body boxes and finite-width tyre surfaces, key G), with M2.5.1.2.1 runtime box-dimension refresh | Implemented, accepted and merged (PR #18); explicitly authorized increment, not a physics milestone; its tyre-surface and visual-size box views were replaced in M2.5.2 |
-| M2.5.2 Motorcycle collision geometry and basic controls (oriented-box ground contacts for chassis, steering assembly, fork slider and swingarm through the generic contact; wheels keep tyre contact only; estimated per-part masses; direct throttle / brake / steering inputs replacing the test torque toggles; wireframe of the physical boxes) | Implemented and verified, awaiting user review |
-| M2.5.3 Distributed finite-width tire contact patch (per-wheel patch constraint with compliant sample normal support, aggregate contact state for the existing tyre model, front/rear independence, debug view) | Stage A (deterministic tyre surface sampling) merged; Stage B (area-weighted compliant normal support, `TirePatchNormalSupport`, not registered in the assembly) implemented and verified locally, awaiting user review; Stages C–E not started |
+| M2.5.2 Motorcycle collision geometry and basic controls (oriented-box ground contacts for chassis, steering assembly, fork slider and swingarm through the generic contact; wheels keep tyre contact only; estimated per-part masses; direct throttle / brake / steering inputs replacing the test torque toggles; wireframe of the physical boxes) | Implemented, accepted and merged (PR #19) |
+| M2.5.3 Distributed finite-width tire contact patch (per-wheel patch constraint with compliant sample normal support, aggregate contact state for the existing tyre model, front/rear independence, debug view) | Stage A (deterministic tyre surface sampling) merged; Stage B (area-weighted compliant normal support, `TirePatchNormalSupport`) merged; Stage C (tyre-force integration on the patch, not registered in the assembly) implemented; PR #25 is the current candidate and is under review until merged (PR #23 and PR #24 were closed without merging), not accepted or merged; Stages D–E not started and not authorized |
 | Further tire/rolling interaction (listed earlier as M2.5.4; scope to be defined by the user) | Not started — not authorized |
 | M2.6 Powertrain interaction (engine, clutch, gearbox, final drive) | Not started — not authorized |
 | Integrated M2 validation | Not started — not authorized |
 
 Remaining work in M2.5.3, in the established order:
 - Stage A — deterministic finite-width tyre surface sampling: merged (PR #20).
-- Stage B — area-weighted compliant normal support: implemented, under review in PR #21 (open).
-- Stage C — tyre-force integration: not started.
-- Stage D — motorcycle builder integration and transactional registration: not started.
-- Stage E — regression, documentation and final reconciliation: not started.
+- Stage B — area-weighted compliant normal support: merged (PR #21).
+- Stage C — tyre-force integration: implemented; PR #25 is the current candidate and is under review until merged (PR #23 and PR #24 were closed without merging).
+- Stage D — motorcycle builder integration and transactional registration: not started, not authorized.
+- Stage E — regression, documentation and final reconciliation: not started, not authorized.
 
 After M2.5.3 the remaining M2 work is the rows after it in the table; their scope is the user's decision. A milestone or stage listed here is **not** authorization to start it:
 work begins only on an explicit user assignment (`AGENTS.md`). M2 stays in progress and is complete only when the user accepts it against the objective above.

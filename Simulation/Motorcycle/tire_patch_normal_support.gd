@@ -4,8 +4,10 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## physically compressed tyre-surface sample of TirePatchSampler (Stage A). Motorcycle-level; the generic solver, ContactConstraint,
 ## ConstraintRow and SimWorld are NOT changed: the rows are VelocityJacobianRow (a ConstraintRow subclass that adds a velocity-side angular
 ## Jacobian) and use the existing `softness` (regularisation) and `bias` fields.
-## It carries NO tangential row, no slip, no rolling resistance and no tyre-force model, and it is not registered by the motorcycle
-## builder (Stage D). Units and equations: PHYSICS_CONVENTIONS.md ("Tyre patch normal support (M2.5.3 Stage B)").
+## Without a tyre specification (`tire == null`, the Stage B configuration built by `create()`) it carries NO tangential row, no slip, no
+## rolling resistance and no tyre-force model. With one (`create_with_tire()`, Stage C, see "Stage C" below) the SAME constraint is the sole
+## owner of the wheel's tangential and rolling-resistance response. It is not registered by the motorcycle builder (Stage D). Units and
+## equations: PHYSICS_CONVENTIONS.md ("Tyre patch normal support (M2.5.3 Stage B)" and "Tyre patch force integration (M2.5.3 Stage C)").
 ##
 ## ---- Physical model (per sample i, represented surface area A_i in m^2, from Stage A) ----
 ##   gap       g_i = n . (x_i - p0)        signed distance of the sample from the plane along the ground normal n (m); g_i < 0 compressed
@@ -82,6 +84,42 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 ## that the compliant support could never act. Samples with g >= 0 therefore have NO row, NO impulse, NO physical load and are NOT
 ## counted as active; positive-gap approach produces no response, and there is nothing to exclude from the load by bookkeeping.
 ##
+## ---- Stage C: tyre-force integration (the tyre model on the aggregate physical state of the patch) ----
+## OWNERSHIP. The patch constraint owns the tangential response because the response needs the CURRENT accumulated normal impulses of the
+## rows of this very constraint in every solver iteration; a second registered constraint could not see them in the same iteration without a
+## solver change. There is exactly ONE tangential response and ONE rolling-resistance response per wheel, no generic friction row and no
+## per-sample traction. TireModel keeps the axes, the slip definition, the combined-slip law and the rolling-resistance law (shared
+## static helpers, also used by the one-point TireGroundContact); MotorcycleTireSpec keeps every parameter and its meaning.
+## AGGREGATE STATE, re-derived from the current rows in EVERY iteration (after the sequential normal rows of that iteration):
+##   Lambda_n = sum_i lambda_i  (N s), N = Lambda_n / dt,   p_eff = sum_i lambda_i p_i / Lambda_n   (p_i: Stage A sample positions of the
+##   start-of-step pose), valid only for finite Lambda_n > 0 (otherwise the safe no-load result: no point, no tangential response).
+##   v_eff = v + omega x (p_eff - x) from the CURRENT velocities. For a rigid wheel this IS the lambda-weighted mean of the sample velocities
+##   (v(p) is affine in p and the weights sum to one), so no per-sample velocity is evaluated. The approximation is the single resultant
+##   force: all samples are driven by the weighted mean slip, so the variation of the slip across the patch (yaw-rate and roll-rate
+##   "spin slip", differing tread speeds of cambered shoulders) and any moment about the contact normal (self-aligning, turn slip) are not modelled.
+## TANGENT FRAME. TireModel.axes(u, n) with the start-of-step axle u: e_x = (n x u)/|n x u| (forward), e_y = e_x x n (right), in the
+## ground plane, orthonormal, following camber and yaw; degenerate (|n x u| < MIN_PLANE_PROJECTION) => no tyre force (the normal support stays).
+## SLIP. s_x = -(v_eff . e_x) + (R_eff - R) Omega, s_y = -(v_eff . e_y), Omega = -(omega . u) (TireModel.slip, evaluated at p_eff and
+## with the live velocities in each iteration); reference speed D = sqrt(v_hub^2 + v_ref^2) frozen at the START of the solve (before the
+## normal warm start), exactly as the one-point contact does.
+## SOLVER ORDER in one iteration: (1) all normal rows (Stage B, unchanged); (2) Lambda_n, p_eff from their current impulses; (3) the carried
+## tangential impulse is RE-SEATED at p_eff (its angular impulse is replaced by (p_eff - x) x L, so the applied wrench is always the
+## resultant force at the current effective point); (4) the 2x2 implicit response with G = S M^-1 P^T built at p_eff
+## (TireModel.implicit_tangential_impulse, the M2.4.2 equations, phi lagged one iteration) and the ONE friction ellipse of the aggregate
+## Lambda_n (one common reduction factor); (5) the change of the resultant is applied to the wheel as the linear impulse L = e_x
+## lambda_x + e_y lambda_y and the angular impulse (p_eff - x) x L; the ground is static. The velocity-side (axle-projected) Jacobian of
+## the normal rows plays no part here: the tangential wrench is the physical force at p_eff. (6) Rolling resistance: M = c_rr N R_eff
+## psi(R_eff Omega / v_rr) about the axle against the frozen spin, M dt applied as the difference to what this step applied (so it follows Lambda_n
+## as the rows converge), once per wheel, outside the ellipse, never warm started, exactly zero without positive load.
+## WARM START. The converged tangential impulse is carried as a world vector, projected into the next tangent plane, scaled by
+## warm_start_factor and clipped into the ellipse of the warm-started aggregate load, then applied at the warm-started p_eff.
+## LIFECYCLE. No positive aggregate normal impulse (separation, invalid sampling, abort, reset), a non-finite aggregate or derived solver
+## value, disabled tyre forces or degenerate axes: tangential impulse, rolling impulse, reported forces and the carried impulse are zero and
+## nothing of the aggregate point or velocity is kept. A non-finite aggregate state is never repaired by skipping samples: the tyre response
+## is withdrawn in that iteration and finish() clears the whole patch with `last_reason`. If that withdrawal is itself not representable in float32
+## (a wheel state near the float32 limit), nothing is written or cleared: the response stays recorded as what the wheel carries, the failure stays
+## terminal, `last_reason` and validate() report the numerical fault (SimWorld then refuses to step) until reset_warm_start() (see _withdrawal_fault).
+
 ## ---- Lifecycle (every fixed step, in prepare()) ----
 ## The samples are re-derived from the start-of-step pose (TirePatchSampler, Stage A; the profile is never re-derived here). Samples are
 ## indexed (lateral_index * circumferential_count + angular_index) and rotate with the wheel, so the index names a material point of
@@ -99,6 +137,8 @@ extends "res://Simulation/Solver/sim_constraint.gd"
 const TireGeometry = preload("res://Simulation/Motorcycle/tire_geometry.gd")
 const TirePatchSampler = preload("res://Simulation/Motorcycle/tire_patch_sampler.gd")
 const VelocityJacobianRow = preload("res://Simulation/Solver/velocity_jacobian_row.gd")
+const TireModel = preload("res://Simulation/Motorcycle/tire_model.gd")
+const MotorcycleTireSpec = preload("res://Simulation/Motorcycle/motorcycle_tire_spec.gd")
 
 ## Parameter bounds: keep every product (k_A * A_i, c_A * A_i, dt * k_i, ...) far from overflow. They are rule limits, not tuning values.
 const MAX_STIFFNESS_DENSITY: float = 1.0e10
@@ -140,6 +180,13 @@ var max_compression: float = 0.0
 var lateral_count: int = 0
 var circumferential_count: int = 0
 
+## Stage C. The tyre of this patch: an OWNED copy of a MotorcycleTireSpec (null = normal support only, the Stage B configuration) and the
+## surface friction coefficient mu_s of the ground from which the ellipse limits mu_x = grip_x mu_s, mu_y = grip_y mu_s follow.
+var tire: MotorcycleTireSpec = null
+var surface_friction: float = 0.0
+## When false the tangential and rolling-resistance responses are zero; the normal support stays available.
+var tire_forces_enabled: bool = true
+
 ## True when the last prepared step had at least one physically compressed sample.
 var contact_active: bool = false
 ## Why the last step produced no support ("" when it had some): the sampling failure reason, "invalid time step", "no compressed sample" or
@@ -158,6 +205,34 @@ var _active_bottomed: Array = []
 ## Physical load (N) of each active sample and the aggregate, from the last solved step.
 var _sample_load: Array = []
 var _load: float = 0.0
+
+# Stage C state. Frame and reference values are frozen at the start of the solve (like every Jacobian); the impulses are the solve state.
+var _axes_valid: bool = false
+var _e_x: Vector3 = Vector3.ZERO
+var _e_y: Vector3 = Vector3.ZERO
+var _axle: Vector3 = Vector3.RIGHT
+var _mu_x: float = 0.0
+var _mu_y: float = 0.0
+var _reference_speed: float = 1.0
+var _spin: float = 0.0  # start-of-solve spin -(w.u), rad/s
+## Aggregate of the current normal rows (see _update_aggregate()).
+var _agg_impulse: float = 0.0
+var _agg_point: Vector3 = Vector3.ZERO
+var _agg_valid: bool = false
+## Tangential impulse in tyre axes (N s) and the wrench the response has applied to the wheel in this step (linear impulse, angular impulse about the COM).
+var _tire_lx: float = 0.0
+var _tire_ly: float = 0.0
+var _applied_linear: Vector3 = Vector3.ZERO
+var _applied_angular: Vector3 = Vector3.ZERO
+var _carried_world: Vector3 = Vector3.ZERO
+var _rolling_impulse: float = 0.0  # rolling-resistance angular impulse about the axle u applied in this step (N m s)
+var _tire_failed: bool = false
+## Terminal numerical fault of the failure path: "" normally; otherwise the description of a tyre response that could NOT be withdrawn because the
+## inverse of what it applied is not representable in float32 (see _withdraw_tire_response()). While it is set the wheel still carries the recorded
+## wrench, the record (_applied_*, _rolling_impulse, _tire_lx/_tire_ly) is HELD (never cleared, so it keeps describing what the wheel carries),
+## no tyre response is applied (_tire_failed stays true), and validate() reports it so SimWorld's preflight refuses further steps. Only
+## reset_warm_start() (an aborted step, or the caller after repairing the wheel state) releases it.
+var _withdrawal_fault: String = ""
 
 
 func _init(p_ground: SimRigidBody, p_wheel: SimRigidBody, p_geometry: TireGeometry, p_wheel_radius: float, p_plane_point: Vector3,
@@ -187,6 +262,30 @@ static func create(ground: SimRigidBody, wheel: SimRigidBody, p_geometry: TireGe
 	var errors: PackedStringArray = support.validate()
 	if not errors.is_empty():
 		push_error("TirePatchNormalSupport.create: %s" % "; ".join(errors))
+		return null
+	support.plane_normal = p_plane_normal.normalized()
+	return support
+
+
+## Stage C: the patch support of a wheel together with its tyre. `p_tire` is validated against the wheel radius and COPIED (later edits of the
+## caller's object never reach the running patch); `p_surface_friction` is the ground coefficient mu_s (> 0). Returns null (with an error) for
+## invalid input, with the same checks as create().
+static func create_with_tire(ground: SimRigidBody, wheel: SimRigidBody, p_geometry: TireGeometry, p_wheel_radius: float, p_plane_point: Vector3,
+		p_plane_normal: Vector3, p_stiffness_density: float, p_damping_density: float, p_max_compression: float,
+		p_lateral_count: int, p_circumferential_count: int, p_tire: MotorcycleTireSpec, p_surface_friction: float):
+	if ground == null or wheel == null:
+		push_error("TirePatchNormalSupport.create_with_tire: bodies must not be null.")
+		return null
+	if p_tire == null:
+		push_error("TirePatchNormalSupport.create_with_tire: the tire specification must not be null.")
+		return null
+	var support = (load("res://Simulation/Motorcycle/tire_patch_normal_support.gd")).new(ground, wheel, p_geometry, p_wheel_radius,
+			p_plane_point, p_plane_normal, p_stiffness_density, p_damping_density, p_max_compression, p_lateral_count, p_circumferential_count)
+	support.tire = p_tire.duplicate_spec()
+	support.surface_friction = p_surface_friction
+	var errors: PackedStringArray = support.validate()
+	if not errors.is_empty():
+		push_error("TirePatchNormalSupport.create_with_tire: %s" % "; ".join(errors))
 		return null
 	support.plane_normal = p_plane_normal.normalized()
 	return support
@@ -233,6 +332,14 @@ func validate() -> PackedStringArray:
 	elif radius_ok and max_compression > MAX_COMPRESSION_RATIO * wheel_radius:
 		errors.append("tire patch: maximum compression %s m must not exceed %s of the wheel radius (%s m)"
 				% [max_compression, MAX_COMPRESSION_RATIO, MAX_COMPRESSION_RATIO * wheel_radius])
+	if tire != null:
+		# Stage C: the existing tyre rules (parameter bounds, rolling radius against the wheel radius) and the surface friction.
+		errors.append_array(tire.validate(wheel_radius if radius_ok else 0.0))
+		if not (is_finite(surface_friction) and surface_friction > 0.0):
+			errors.append("tire patch: surface friction must be finite and > 0 (got %s)" % surface_friction)
+	if _withdrawal_fault != "":
+		# A runtime fault, not bad data: reported here because validate() is the channel through which SimWorld's preflight refuses to step.
+		errors.append(_withdrawal_fault)
 	return errors
 
 
@@ -379,6 +486,152 @@ func carried_impulse_total() -> float:
 	return total
 
 
+# --- Stage C queries (aggregate physical state and tyre response; forces are the LAST solved step's results) ---
+
+## Sums the CURRENT accumulated normal impulses of the active rows (so it is valid inside a solver iteration, not only after finish()) into
+## _agg_impulse, and the impulse-weighted mean of the Stage A sample positions into _agg_point. No division unless the impulse is finite and > 0;
+## the no-load result is zero impulse, Vector3.ZERO and _agg_valid = false (never NaN, never a stale point).
+func _update_aggregate() -> void:
+	var total: float = 0.0
+	var sx: float = 0.0
+	var sy: float = 0.0
+	var sz: float = 0.0
+	for k in mini(rows.size(), _active_position.size()):
+		var lambda_i: float = rows[k].accumulated_impulse
+		var p: Vector3 = _active_position[k]
+		total += lambda_i
+		sx += lambda_i * p.x
+		sy += lambda_i * p.y
+		sz += lambda_i * p.z
+	_agg_impulse = total
+	_agg_point = Vector3.ZERO
+	_agg_valid = false
+	if is_finite(total) and total > 0.0:
+		var point: Vector3 = Vector3(sx / total, sy / total, sz / total)
+		if point.is_finite():
+			_agg_point = point
+			_agg_valid = true
+
+
+## Aggregate PHYSICAL normal impulse (N s) of the current rows: the sum of their accumulated impulses. Zero without active support.
+func aggregate_normal_impulse() -> float:
+	_update_aggregate()
+	return _agg_impulse if contact_active and is_finite(_agg_impulse) else 0.0
+
+
+## Aggregate physical normal load N = Lambda_n / dt (N). Zero without active support.
+func aggregate_normal_load() -> float:
+	return aggregate_normal_impulse() / _dt if _dt > 0.0 else 0.0
+
+
+## True when the aggregate state is usable: positive finite aggregate normal impulse and a finite effective point.
+func has_aggregate_contact() -> bool:
+	_update_aggregate()
+	return contact_active and _agg_valid
+
+
+## Effective contact point (world): the normal-impulse weighted mean of the sample positions. Vector3.ZERO (with has_aggregate_contact() false) without load.
+func effective_contact_point() -> Vector3:
+	_update_aggregate()
+	return _agg_point if contact_active and _agg_valid else Vector3.ZERO
+
+
+## Rigid-body velocity at the effective contact point from the CURRENT wheel velocities (v + w x (p_eff - x)); Vector3.ZERO without load.
+func effective_contact_velocity() -> Vector3:
+	_update_aggregate()
+	if not (contact_active and _agg_valid):
+		return Vector3.ZERO
+	return body_b.linear_velocity + body_b.angular_velocity.cross(_agg_point - body_b.position)
+
+
+## Longitudinal axis (forward, projected on the ground) and lateral axis (right) of the last prepared step; zero for degenerate axes, without a
+## tyre and without support.
+func longitudinal_axis() -> Vector3:
+	return _e_x if _axes_valid and contact_active else Vector3.ZERO
+
+
+func lateral_axis() -> Vector3:
+	return _e_y if _axes_valid and contact_active else Vector3.ZERO
+
+
+## Slip of the wheel from its CURRENT state evaluated at the effective contact point (TireModel.slip with this tyre; {valid = false, reason}
+## without a tyre, without aggregate load or for degenerate geometry).
+func current_slip() -> Dictionary:
+	if tire == null:
+		return {"valid": false, "reason": "no tire specification"}
+	_update_aggregate()
+	if not (contact_active and _agg_valid):
+		return {"valid": false, "reason": "no positive aggregate normal impulse"}
+	return TireModel.slip(body_b.position, body_b.orientation, body_b.linear_velocity, body_b.angular_velocity, wheel_radius, tire.rolling_radius,
+			plane_point, plane_normal, tire.low_speed_reference, _agg_point)
+
+
+## Tangential tyre force on the wheel (N) along e_x / e_y in the last solved step (after the ellipse scaling; rolling resistance excluded).
+func longitudinal_force() -> float:
+	return _tire_lx / _dt if _dt > 0.0 else 0.0
+
+
+func lateral_force() -> float:
+	return _tire_ly / _dt if _dt > 0.0 else 0.0
+
+
+## Total tangential tyre force on the wheel as a world vector (N).
+func tangential_force_world() -> Vector3:
+	return _applied_linear / _dt if _dt > 0.0 else Vector3.ZERO
+
+
+## Moment about the wheel centre (N m, world) that the tangential response applied: (p_eff - x) x F, the resultant force at the effective point.
+func tangential_moment_world() -> Vector3:
+	return _applied_angular / _dt if _dt > 0.0 else Vector3.ZERO
+
+
+## Rolling-resistance moment on the wheel about its axle u (N m): positive along +u, i.e. against the spin of a forward-rolling wheel.
+func rolling_resistance_torque() -> float:
+	return _rolling_impulse / _dt if _dt > 0.0 else 0.0
+
+
+## Diagnostic: the longitudinal force at the tread equal to the rolling-resistance moment, -M / R_eff (the effect is applied as the moment).
+func rolling_resistance_force() -> float:
+	return -rolling_resistance_torque() / tire.rolling_radius if tire != null else 0.0
+
+
+## Friction limits mu_x N and mu_y N of the last step (N), from the aggregate load; zero without a tyre or load.
+func longitudinal_force_limit() -> float:
+	return _mu_x * _load if tire != null and _axes_valid else 0.0
+
+
+func lateral_force_limit() -> float:
+	return _mu_y * _load if tire != null and _axes_valid else 0.0
+
+
+## Friction-ellipse utilisation sqrt((Fx/(mu_x N))^2 + (Fy/(mu_y N))^2) of the aggregate response in the last step, in [0, 1]; 0 without load.
+func friction_utilization() -> float:
+	var ln: float = _load * _dt
+	if not (ln > 0.0 and _mu_x > 0.0 and _mu_y > 0.0 and tire != null and _axes_valid):
+		return 0.0
+	var ux: float = _tire_lx / (_mu_x * ln)
+	var uy: float = _tire_ly / (_mu_y * ln)
+	return sqrt(ux * ux + uy * uy)
+
+
+func friction_coefficient_longitudinal() -> float:
+	return tire.grip_longitudinal * surface_friction if tire != null else 0.0
+
+
+func friction_coefficient_lateral() -> float:
+	return tire.grip_lateral * surface_friction if tire != null else 0.0
+
+
+## Carried (warm-start) tangential tyre impulse (N s, world vector) that the next step would apply; zero after separation, reset and without a tyre.
+func carried_tire_impulse() -> Vector3:
+	return _carried_world
+
+
+## Number of tangential responses applied through this constraint: one (one resultant per wheel) when the tyre acts, otherwise zero.
+func tangential_response_count() -> int:
+	return 1 if tire != null and tire_forces_enabled and _axes_valid and contact_active else 0
+
+
 # --- Solver interface ---
 
 ## Re-derives the samples and rebuilds the ACTIVE rows (Jacobian, softness, bias, bounds, split correction) from the start-of-step state.
@@ -465,9 +718,20 @@ func _update_rows(dt: float, config) -> void:
 	rows = new_rows
 
 
+## Stage C: the tyre's start-of-solve frame (axes, reference speed, spin) is read BEFORE the normal warm start, so the frozen values are those of
+## the start of the solve exactly as in the one-point contact; the tangential warm start follows the warm-started normal rows.
+func prepare(dt: float, config) -> void:
+	_capture_tire_frame()
+	super.prepare(dt, config)
+	_prepare_tire(config)
+
+
+## Normal rows first (Stage B, unchanged), then the ONE tangential and the ONE rolling-resistance response of the patch, from the aggregate
+## of those rows as they are NOW (same iteration).
 func solve_iteration() -> void:
 	if contact_active:
 		super.solve_iteration()
+		_solve_tire_iteration()
 
 
 func solve_split_iteration() -> void:
@@ -481,20 +745,32 @@ func finish() -> void:
 	_load = 0.0
 	if not contact_active or not (_dt > 0.0):
 		return
+	if _tire_failed:
+		# A failed response has either withdrawn everything it applied (and applied nothing since: it is terminal for the solve), which makes the
+		# call below a no-op, or it could not (_withdrawal_fault): then the record is held, not cleared, because the wheel still carries it.
+		_withdraw_or_hold()
+		last_reason = _withdrawal_fault if _withdrawal_fault != "" else "non-finite aggregate tire state or derived tyre solver value"
+		_clear_state()
+		return
 	var total: float = 0.0
 	for row in rows:
 		var load: float = row.accumulated_impulse / _dt
 		_sample_load.append(load)
 		total += load
 	if not is_finite(total):
+		_fail_tire_response()
+		last_reason = _withdrawal_fault if _withdrawal_fault != "" else "non-finite aggregate tire state or derived tyre solver value"
 		_clear_state()
 		return
 	_load = total
+	var tire_on: bool = tire != null and tire_forces_enabled and _axes_valid
+	_carried_world = (_e_x * _tire_lx + _e_y * _tire_ly) if tire_on else Vector3.ZERO
 
 
 ## SimWorld calls it after an aborted step: every carried impulse and every derived result is discarded.
 func reset_warm_start() -> void:
 	super()
+	_withdrawal_fault = ""  # the only release of a withdrawal fault (the wheel state was restored by the abort or repaired by the caller)
 	_clear_state()
 
 
@@ -510,3 +786,247 @@ func _clear_state() -> void:
 	_active_bottomed = []
 	_sample_load = []
 	_load = 0.0
+	_clear_tire_state()
+
+
+# --- Stage C: tyre response ---
+
+## Discards the whole tyre state: tangential impulse, applied wrench, carried impulse, rolling impulse, aggregate and the frame of the last step.
+## EXCEPT a held withdrawal fault (see `_withdrawal_fault`): the wheel still carries that response, so its record, the tangential impulse that
+## produced it and the failure flag survive every clear except reset_warm_start(); the aggregate, the frame and the carried (warm start) impulse
+## are still discarded, so nothing of it is carried into a later solve.
+func _clear_tire_state() -> void:
+	_axes_valid = false
+	_agg_impulse = 0.0
+	_agg_point = Vector3.ZERO
+	_agg_valid = false
+	_carried_world = Vector3.ZERO
+	if _withdrawal_fault != "":
+		return
+	_tire_lx = 0.0
+	_tire_ly = 0.0
+	_applied_linear = Vector3.ZERO
+	_applied_angular = Vector3.ZERO
+	_rolling_impulse = 0.0
+	_tire_failed = false
+
+
+## Tyre axes, reference speed, spin and friction limits from the start-of-solve state (frozen for the step; before any impulse of this step).
+func _capture_tire_frame() -> void:
+	_axes_valid = false
+	if tire == null or not tire_forces_enabled:
+		return
+	var u: Vector3 = (body_b.orientation * AXLE_LOCAL).normalized()
+	var tyre_axes: Dictionary = TireModel.axes(u, plane_normal)
+	if not (tyre_axes["valid"] and body_b.linear_velocity.is_finite() and body_b.angular_velocity.is_finite()):
+		return
+	_axle = u
+	_e_x = tyre_axes["longitudinal"]
+	_e_y = tyre_axes["lateral"]
+	_mu_x = tire.grip_longitudinal * surface_friction
+	_mu_y = tire.grip_lateral * surface_friction
+	var hub: float = body_b.linear_velocity.dot(_e_x)
+	_reference_speed = sqrt(hub * hub + tire.low_speed_reference * tire.low_speed_reference)
+	_spin = -body_b.angular_velocity.dot(u)
+	_axes_valid = true
+
+
+## Resets the solve state of the tyre response and applies the warm start: the carried tangential impulse, projected into the current tangent
+## plane and scaled into the current ellipse, at the effective point of the warm-started normal rows. Cold when there is no load.
+func _prepare_tire(config) -> void:
+	if _withdrawal_fault != "":
+		# A held withdrawal fault is terminal until reset_warm_start(): no response is applied and the record of what the wheel still carries stays.
+		_tire_failed = true
+		_carried_world = Vector3.ZERO
+		_agg_impulse = 0.0
+		_agg_point = Vector3.ZERO
+		_agg_valid = false
+		last_reason = _withdrawal_fault
+		return
+	_tire_lx = 0.0
+	_tire_ly = 0.0
+	_applied_linear = Vector3.ZERO
+	_applied_angular = Vector3.ZERO
+	_rolling_impulse = 0.0
+	_tire_failed = false
+	_agg_impulse = 0.0
+	_agg_point = Vector3.ZERO
+	_agg_valid = false
+	if not contact_active or tire == null or not tire_forces_enabled or not _axes_valid:
+		_carried_world = Vector3.ZERO
+		_axes_valid = _axes_valid and contact_active
+		return
+	var carried: Vector3 = _carried_world * config.warm_start_factor
+	_carried_world = Vector3.ZERO
+	if not config.warm_starting or not carried.is_finite():
+		return
+	_update_aggregate()
+	if not _agg_valid:
+		return
+	carried -= plane_normal * carried.dot(plane_normal)
+	var clipped: Vector2 = TireModel.into_ellipse(carried.dot(_e_x), carried.dot(_e_y), _agg_impulse, _mu_x, _mu_y)
+	_apply_tangential_wrench(clipped.x, clipped.y, _agg_point)
+
+
+## Makes the wrench that the tangential response has applied to the wheel equal to the resultant force (lambda_x e_x + lambda_y e_y) acting at
+## `point`: the linear impulse L and the angular impulse (point - x) x L. Only the DIFFERENCE to what was applied before is added to the wheel,
+## so the impulse follows both the amount and the point of application as the normal rows converge. The ground is static and takes nothing.
+func _apply_tangential_wrench(lambda_x: float, lambda_y: float, point: Vector3) -> void:
+	if _tire_failed:
+		return  # a failed response is terminal for the solve (see _fail_tire_response())
+	# Validate-then-apply: every candidate is derived first and the wheel and the bookkeeping are touched only when ALL of them are finite. Finite
+	# scalar impulses can still overflow here (a Vector3 is float32), so the derived impulses, their changes, the velocity changes and the resulting
+	# velocities are checked, not just the inputs. An invalid candidate is a tyre failure (never clamped to zero, never half applied); a valid zero
+	# response is finite and passes. The record is therefore always finite (_withdraw_tire_response() still validates it and the rollback it derives).
+	var valid: bool = is_finite(lambda_x) and is_finite(lambda_y) and point.is_finite()
+	var linear: Vector3 = Vector3.ZERO
+	var angular: Vector3 = Vector3.ZERO
+	var velocity: Vector3 = Vector3.ZERO
+	var spin: Vector3 = Vector3.ZERO
+	if valid:
+		linear = _e_x * lambda_x + _e_y * lambda_y
+		angular = (point - body_b.position).cross(linear)
+		var d_linear: Vector3 = linear - _applied_linear
+		var d_angular: Vector3 = angular - _applied_angular
+		var d_velocity: Vector3 = d_linear * body_b.inverse_mass
+		var d_spin: Vector3 = body_b.inverse_inertia_world * d_angular
+		velocity = body_b.linear_velocity + d_velocity
+		spin = body_b.angular_velocity + d_spin
+		valid = (linear.is_finite() and angular.is_finite() and d_linear.is_finite() and d_angular.is_finite() and d_velocity.is_finite()
+				and d_spin.is_finite() and velocity.is_finite() and spin.is_finite())
+	if not valid:
+		_fail_tire_response()
+		return
+	body_b.linear_velocity = velocity
+	body_b.angular_velocity = spin
+	_applied_linear = linear
+	_applied_angular = angular
+	_tire_lx = lambda_x
+	_tire_ly = lambda_y
+
+
+## One tangential and rolling-resistance update from the aggregate of the normal rows as they are right now (see the Stage C header).
+func _solve_tire_iteration() -> void:
+	if tire == null or not tire_forces_enabled or not _axes_valid:
+		return
+	if _tire_failed:
+		return  # terminal for the rest of this solve: no later iteration applies any tangential or rolling-resistance response
+	_update_aggregate()
+	if not _agg_valid:
+		# A non-finite aggregate is a failure, never a skipped sample.
+		if not is_finite(_agg_impulse):
+			_fail_tire_response()
+			return
+		# Zero aggregate load: withdraw whatever this step had applied (a valid zero response; the next iteration may find load again).
+		_apply_tangential_wrench(0.0, 0.0, body_b.position)
+		_solve_rolling_resistance(0.0)
+		return
+	var ln: float = _agg_impulse
+	# Re-seat the carried tangential impulse at the CURRENT effective point before the slip is measured.
+	_apply_tangential_wrench(_tire_lx, _tire_ly, _agg_point)
+	if _tire_failed:
+		return  # the re-seat itself can fail (see _apply_tangential_wrench())
+	var r: Vector3 = _agg_point - body_b.position
+	var v_c: Vector3 = body_b.linear_velocity + body_b.angular_velocity.cross(r)
+	var rr_offset: float = tire.rolling_radius - wheel_radius
+	# Slip velocities of the tread at p_eff (TireModel.slip): s_x = -(v_c.e_x) + (R_eff - R) spin with spin = -(w.u); s_y = -(v_c.e_y).
+	var s_x: float = -v_c.dot(_e_x) - rr_offset * _axle.dot(body_b.angular_velocity)
+	var s_y: float = -v_c.dot(_e_y)
+	# Exact 2x2 response G = S M^-1 P^T of the slip velocities to unit tangential impulses at p_eff (impulse rows P: linear e, angular r x e).
+	var p_x_ang: Vector3 = r.cross(_e_x)
+	var p_y_ang: Vector3 = r.cross(_e_y)
+	var sx_ang: Vector3 = -p_x_ang - _axle * rr_offset
+	var sy_ang: Vector3 = -p_y_ang
+	var im: float = body_b.inverse_mass
+	var ip_x: Vector3 = body_b.inverse_inertia_world * p_x_ang
+	var ip_y: Vector3 = body_b.inverse_inertia_world * p_y_ang
+	var g00: float = im * (-_e_x).dot(_e_x) + sx_ang.dot(ip_x)
+	var g01: float = im * (-_e_x).dot(_e_y) + sx_ang.dot(ip_y)
+	var g10: float = im * (-_e_y).dot(_e_x) + sy_ang.dot(ip_x)
+	var g11: float = im * (-_e_y).dot(_e_y) + sy_ang.dot(ip_y)
+	var target: Vector2 = Vector2.ZERO
+	if _mu_x > 0.0 and _mu_y > 0.0:
+		target = TireModel.implicit_tangential_impulse(s_x, s_y, ln, _tire_lx, _tire_ly, g00, g01, g10, g11, tire.longitudinal_stiffness,
+				tire.lateral_stiffness, _mu_x, _mu_y, _reference_speed)
+	if not (is_finite(s_x) and is_finite(s_y) and is_finite(g00) and is_finite(g01) and is_finite(g10) and is_finite(g11) and target.is_finite()):
+		_fail_tire_response()
+		return
+	_apply_tangential_wrench(target.x, target.y, _agg_point)
+	_solve_rolling_resistance(ln)
+
+
+## Rolling-resistance angular impulse about the axle, a function of the current AGGREGATE normal impulse and the frozen spin; the difference to
+## what was already applied this step is applied (so it follows the load as the rows converge, and is never warm started). One per wheel.
+## Every derived value is validated BEFORE the wheel is touched: the target, the change to the applied impulse, the angular-velocity change (a
+## Vector3 is float32, so a finite float64 target can still overflow here) and the resulting angular velocity. An invalid value is a tyre failure
+## (_fail_tire_response()), never clamped to zero: a valid zero response (no load, zero spin) is a different thing and stays valid.
+func _solve_rolling_resistance(ln: float) -> void:
+	if _tire_failed:
+		return
+	var target: float = 0.0
+	if ln > 0.0:
+		# TireModel.rolling_resistance_force(v, N, c, v_rr) = -c N psi(v / v_rr); the moment about +u opposes a positive spin.
+		target = -TireModel.rolling_resistance_force(tire.rolling_radius * _spin, ln, tire.rolling_resistance, tire.rolling_resistance_speed) * tire.rolling_radius
+	var delta: float = target - _rolling_impulse
+	var d_omega: Vector3 = body_b.inverse_inertia_world * (_axle * delta)
+	var omega: Vector3 = body_b.angular_velocity + d_omega
+	if not (is_finite(target) and is_finite(delta) and d_omega.is_finite() and omega.is_finite()):
+		_fail_tire_response()
+		return
+	_rolling_impulse = target
+	body_b.angular_velocity = omega
+
+
+## The ONE tyre-failure path. The tyre response of this solve is marked failed (TERMINAL until the next prepare() or a clear: every later iteration
+## returns before applying anything) and whatever it has applied to the wheel is withdrawn, so the wheel is left as the normal rows alone made it.
+## If that withdrawal is not representable the fault is held instead (_withdraw_or_hold()): the failure is then a terminal NUMERICAL FAULT.
+func _fail_tire_response() -> void:
+	_tire_failed = true
+	_withdraw_or_hold()
+
+
+## Withdraws the recorded response, or, when its inverse cannot be represented, holds the record and raises the terminal numerical fault.
+## Never clamps and never half applies. A fault already held is left as it is (the record is not touched a second time).
+func _withdraw_or_hold() -> void:
+	if _withdrawal_fault != "":
+		return
+	if not _withdraw_tire_response():
+		_withdrawal_fault = "tire patch: the tyre response could not be withdrawn because the inverse of the recorded wrench is not representable (non-finite recorded impulse or wheel velocity, or a rollback beyond the float32 range; linear impulse %s, angular impulse %s, rolling impulse %s). The wheel keeps the recorded response and the record is held; reset_warm_start() releases it after the wheel state is repaired" % [_applied_linear, _applied_angular, _rolling_impulse]
+
+
+## Removes from the wheel the tangential wrench and the rolling-resistance moment that this solve has applied, using the bookkeeping that recorded
+## them (the exact inverse of what _apply_tangential_wrench() and _solve_rolling_resistance() added), then zeroes that bookkeeping. Returns true when
+## the wheel no longer carries the response (including when nothing was recorded).
+## VALIDATE-THEN-WRITE, like both response paths: the record, the wheel velocities, every velocity change and both resulting velocities are checked
+## BEFORE either velocity is written, so the rollback is atomic (linear, tangential angular and rolling angular parts together, never one without the
+## others) and a Vector3 (float32) overflow cannot reach the wheel. A finite wheel state near the float32 limit can still have a non-representable
+## inverse, and a clamp would not be a rollback (the record would no longer equal what the wheel carries), so in that case NOTHING is written or cleared
+## and false is returned; the caller turns that into the held numerical fault. A non-finite record is not "never applied" (that was only true while
+## nothing could tamper with it): it cannot be inverted, hence also a fault.
+func _withdraw_tire_response() -> bool:
+	if _applied_linear == Vector3.ZERO and _applied_angular == Vector3.ZERO and _rolling_impulse == 0.0:
+		_tire_lx = 0.0
+		_tire_ly = 0.0
+		return true  # nothing recorded, nothing to invert
+	var roll_impulse: Vector3 = _axle * _rolling_impulse
+	var d_linear: Vector3 = _applied_linear * body_b.inverse_mass
+	var d_spin: Vector3 = body_b.inverse_inertia_world * _applied_angular
+	var d_roll: Vector3 = body_b.inverse_inertia_world * roll_impulse
+	var velocity: Vector3 = body_b.linear_velocity - d_linear
+	# REVERSE ORDER of the application (tangential first, rolling second): the rolling moment comes off first, then the tangential one. float32
+	# sums are not associative: when the tangential contribution is large, the forward sum (w + d_tan) + d_roll may have lost a small d_roll, and
+	# removing d_tan first would then leave a residual of d_roll in the spin; undoing the steps in reverse order cancels exactly that rounding.
+	var spin_rolling: Vector3 = body_b.angular_velocity - d_roll
+	var spin: Vector3 = spin_rolling - d_spin
+	if not (_applied_linear.is_finite() and _applied_angular.is_finite() and is_finite(_rolling_impulse) and _axle.is_finite()
+			and body_b.linear_velocity.is_finite() and body_b.angular_velocity.is_finite() and roll_impulse.is_finite()
+			and d_linear.is_finite() and d_spin.is_finite() and d_roll.is_finite() and velocity.is_finite() and spin_rolling.is_finite() and spin.is_finite()):
+		return false
+	body_b.linear_velocity = velocity
+	body_b.angular_velocity = spin
+	_applied_linear = Vector3.ZERO
+	_applied_angular = Vector3.ZERO
+	_tire_lx = 0.0
+	_tire_ly = 0.0
+	_rolling_impulse = 0.0
+	return true
